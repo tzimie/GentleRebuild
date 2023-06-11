@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+    <title>GentleRebuild</title>
+  </head>
+  <body> <img src="defraglogo.png" alt="" title="DefragLogo">
+    <p><b>GentleRebuild</b> is Powershell script for online index rebuild in
+      high-load clustered MSSQL databases working 24/7 - <b>Enterprise Edition
+      </b>is expected, Standard Edition is not supported. Script executes <strong>ALTER
+        INDEX ... REBUILD</strong> in a safe controlled mode using 2 threads:
+      one thread is executing the command while second one is checking the
+      environment for several conditions. What is controlled:</p>
+    <ul>
+      <li>Too active index rebuild activity can overflow the <b>LDF</b> file -
+        transaction log backup could be not fast enough to flush the generated
+        log to the disk</li>
+      <li>High index rebuild activity can fill <b>AlwaysOn</b> queues (Send and
+        Redo) above safe thresholds</li>
+      <li>Or, despite the ONLINE option, rebuild can block other processes via
+        schema locks - in such cases script "yields", stopping it work
+        temporarily</li>
+      <li>Controlled deadline time - deadline is a time when script should stop
+        (not to interfere with the other important processes running on a fixed
+        schedule)</li>
+      <li>Exception list of tables and indexes - schemas named 'import', 'tmp',
+        tables named 'tmp_%' etc.</li>
+      <li>Indexes which can't be rebuilt with the options <b>RESUMABLE=ON</b>
+        or even <b>ONLINE=ON </b>- such case indexes are skipped when size is
+        above the defined thresholds</li>
+      <li>Limits the maximum duration of continuous index rebuild </li>
+      <li>Limits the maximum size of indexes rebuild during a single run - in
+        case the amount of total space for transaction log backups is limited or
+        logs are used to roll over to STANDBY databases.</li>
+    </ul>
+    <p><strong>SQL server script<br>
+      </strong></p>
+    <ul>
+      <li>Execute script <strong>FRG_install.sql</strong> on a "DBA" database.
+        In almost any environment there is dedicated "DBA" database - DBA,
+        SYSSYS, Optimization, names differ. In the worse case, if there is no
+        such database, use msdb.</li>
+      <li>Execute procedure <strong>FRG_FillSizeStats</strong> to fill a table
+        with object list and sizes. This procedure usually finishes it's work it
+        few seconds</li>
+      <li>Execute procedure<strong> FRG_FillFragmentation</strong> to analyze a
+        level of fragmentation. Default mode is the fastest one, '<strong>LIMITED</strong>',
+        however, it could take up to a day to analyze 30-100Tb. This is why
+        powershell program doesn't analyze the fragmentation level during it's
+        run, but relies on the previously collected information. First parameter
+        of this stored procedure allows you to limit the analysis by a single
+        database. By defaul all non system databases are analyzed.</li>
+      <li>When script finishes the index rebuild, it updates the size and
+        fragmentation info using the stored procedure <strong>FRG_FillFragmentationOne</strong>.
+        Typically fragmentation level drops below the threshold, so on the next
+        run an index won't be affected</li>
+      <li>Powershell script relies on the static previously collected
+        information, not on the actual fragmentation level NOW. (which can
+        gradually deteriorate after an analysis). This is why steps 2 and 3
+        should be executed again from time to time.</li>
+      <li>Underlying tables keep all the history of sizes and fragmentation
+        levels, the last value can be selected from a view <strong>FRG_last</strong>:</li>
+    </ul>
+    <img src="frglast.png" alt="">
+    <p><strong>Powershell Script parameters<br>
+      </strong></p>
+    <p>When you run powershell script, supply a configuration file name as first
+      parameter, for example:</p>
+    <p><em>powershell .\GentleRebuild.ps1 param</em></p>
+    <p>where param.frg - is JSON files with parameters, for example:</p>
+    <p><em>{</em><br>
+      <em>&nbsp; server: "myServer",</em><br>
+      <em>&nbsp; dbname: "db1,db2,anotherDb",</em></p>
+    <p><em>&nbsp; allowNonResumable: 50,</em><br>
+      <em>&nbsp; allowNonOnline: 10,</em><br>
+      <em>&nbsp; threshold: 40,</em><br>
+      <em>&nbsp; extrafilter: " and SchemaName not in ('tmp','import') and
+        page_count&gt;100 and TotalSpaceMb&lt;1000000",</em></p>
+    <p><em>&nbsp; deadline: "23:00",</em><br>
+      <em>&nbsp; rebuildopt: "DATA_COMPRESSION=PAGE,MAXDOP=2",</em><br>
+      <em>&nbsp; columnstoreopt: "MAXDOP=1",</em><br>
+      <em>&nbsp; relaxation: 30,</em><br>
+      <em>&nbsp; maxlogused: 200000,</em><br>
+      <em>&nbsp; maxlogusedpct: 0,</em><br>
+      <em>&nbsp; maxqlen: 25000,</em><br>
+      <em>&nbsp; maxdailysize: 1000000,</em><br>
+      <em>&nbsp; chunkminutes: 0,</em><br>
+      <em>&nbsp; workdb: "DBA"</em><br>
+      <em>}</em></p>
+    <p><br>
+      <b>All parameters in detail:</b></p>
+    <ul>
+      <li>Where and what to rebuild:<br>
+        <ul>
+          <li><strong>server</strong> - server name (Integrated Security is
+            used, if you do need SQL login edit the ps1 file)</li>
+          <li><strong>dbname</strong> - Database name to defragement. You can
+            provide comma separated list. * means all non-system databases.</li>
+          <li><strong>workdb</strong> - DBA database (see above)</li>
+          <li><strong>threshold</strong> - fragmentation threshold in percent.</li>
+          <li><strong>extrafilter</strong> - Additional filter, which is applied
+            against FRG_last view. Useful filter examples:<br>
+            <ul>
+              <li>page_count&gt;100 to skip tiny tables. Even after rebuild they
+                could be too fragmented because they don't have enough pages to
+                be completely populated</li>
+              <li>TotalSpaceMb&lt;1000000 - Skip huge indexes, they need extra
+                care.</li>
+              <li>exceptions by SchemaName, Tablename, IndexName etc</li>
+            </ul>
+          </li>
+          <li><strong>AllowNonResumable</strong> - size in Gb. If an index can't
+            be rebuilt using <b>RESUMABLE=ON</b>, an attempt is made to rebuild
+            it with <b>ONLINE=ON</b>. However, in that case process can't be
+            interrupted, and program can't yield to locks. This is why index
+            should be small enough. It index size is bigger than that value it
+            is skipped. Most HEAP indexes fall into that category.</li>
+          <li><strong>AllowNonOnline</strong> - size in Gb. Some indexes can't
+            be rebuilt even using <b>ONLINE=ON</b>. Then they are rebuild
+            OFFLINE, locking other processes. They should be smaller than a
+            threshold, or they are skipped. Obviously <strong>AllowNonOnline</strong>
+            should be even smaller than <strong>AllowNonResumable&nbsp;</strong></li>
+        </ul>
+      </li>
+      <li>How to rebuild<br>
+        <ul>
+          <li><strong>deadline</strong> - string in "HH:MM" format or an empty
+            string. If current time is greater than deadline, tomorrow time is
+            assumed. What deadline affects:
+            <ul>
+              <li>If deadline is reached, and there are still indexes to work
+                on, process stops without starting a work on a next index</li>
+              <li>If during a rebuild a projected time of completion (ETA) falls
+                behind the deadline, and when work is between 2% and 3% (not far
+                enough), then rebuild is terminated (using ABORT). However, it
+                doesn't guarantee that work would always finish before the
+                deadline, as process can slow down later. In such cases manual
+                intervention is required (check "interactive menu")</li>
+              <li>If ETA is behind the deadline, the progress messages are
+                highlighted with yellow to attract an attention.</li>
+            </ul>
+          </li>
+          <li><strong>rebuildopt </strong>- rebuild options for ordinary
+            indexes (CLUSTERED, NONCLUSTERED, HEAP). Don't use MAX_DURATION, use
+            <b>chunkminutes </b>instead. Regarding MAXDOP:
+            <ul>
+              <li>MAXDOP = 1 - slowly without much pressure on a server</li>
+              <li>MAXDOP = 2 - normal work, recommended option</li>
+              <li>MAXDOP = 4 - aggressive work</li>
+              <li>It is not recommended to use MAXDOP&gt;4, you will reach the
+                AlwaysOn limitations, and the process will be throttled</li>
+              <li>Note: for some indexes MAXDOP is ignored and server uses 1-2
+                threads no matter what MADOP is.</li>
+            </ul>
+          </li>
+          <li><strong>columnstoreopt</strong> - similar options for COLUMNSTORE
+            indexes (COLUMNSTORE index support is experimental)</li>
+          <li><strong>relaxation</strong> - number of seconds process sleeps
+            when throttled by throttling conditions (LDF use size, AlwaysOn
+            queues, locking)</li>
+          <li><strong>maxlogused</strong> - size in Mb used in log (LDF). When
+            used space is greater than this value, script stops (throttles) for
+            (relaxation) seconds and waits until the condition is cleared
+            (transaction log backup carries away log). Value 0 means 'don't
+            check'</li>
+          <li><strong>maxlogusedpct</strong> - Same but in percent to the total
+            size of transaction log. Value 0 means 'don't check. Typically one
+            of these 2 conditions is verified.</li>
+          <li><strong>maxqlen</strong> - Max size of AlwaysOn queues in Mb (log
+            send queue + redo queue) for all databases. If value is above the
+            threshold, process is throttled. To skip this check specify a very
+            high value</li>
+          <li><strong>maxdailysize</strong> - maximum work size of indexes
+            rebuilt in Mb. Condition is verified when work on a new index is
+            started. 0 means 'don't check'</li>
+          <li><strong>chunkminutes</strong> - similar to MAX_DURATION, but is
+            implemented using Powershell. 0 means no max duration, unless there
+            are throttling conditions. Time is counted since last throttling.<strong><br>
+            </strong></li>
+        </ul>
+      </li>
+    </ul>
+    <p><b>Interactive menu</b></p>
+    <p>By pressing Ctrl/C while script is progressing (not throttling) you enter
+      an interactive menu (might take up to 15 seconds for the menu to appear):</p>
+    <img src="interactivemenu.png" alt=""><br>
+    <p>It displayes the current rebuild command and waits for a single character
+      command. Don't leave it waiting for a command - it such state throttling
+      conditions are not controlled. After command 'S' you can change the
+      parameters and restart the script, it would continue from the same index.
+      However MAXDOP can't be changed once rebuild is started.</p>
+    <p><strong>Additional comments:<br>
+      </strong></p>
+    <ul>
+      <li>Script starts from smaller indexes and is progressing towards the
+        bigger ones</li>
+      <li>Percentage is calculated based on the data in a table <b>index_resumable_operations</b>,
+        if operation is with RESUMABLE option. Otherwise, there is a rough
+        estimation based on the IO count vs page_count (rough estimation ... %).
+        For COLUMNSTORE percentage is calculated based on the number of
+        ROWSTOREs rebuilt.</li>
+      <li>Sometimes after throttling the percentage doesn't increase and you
+        will see ETA: (unknown). SQL server is seeking for a place from where to
+        continue (rewinding effect). Sometimes it could take a long time </li>
+      <li>You can check a global progress on a console title</li>
+      <li>ETA for the global progress is calculated when at least 1% of the
+        total work is done</li>
+      <li>Don't leave indexes in a suspended resumable state. SQL server still
+        has to track all the changes and some queries can run slower.</li>
+      <li>Indexes in a stopped resumable state can fail over to another server,
+        and rebuild can continue on another server (!!!)</li>
+      <li>To track changes for ONLINE indexes, SQL has to change execution plans
+        which update these table. In most cases there is only mild performance
+        degradation, but in few cases (with MERGE) the difference could be
+        dramatic</li>
+      <li>Sometimes index rebuild can slow down processes even on unrelated
+        databases for unknown reasons. Throttling or
+        <b> chunkminutes </b>solves this problem. It is not known where the
+        magic is, but looks like Microsoft knows something and had invented
+        MAX_DURATION for that reason.</li>
+      <li>If you chose <b>chunkminutes </b>too small the rebuild performance
+        could suffer because of the "rewinding effect"</li>
+      <li>COLUMNSTORE support is experimental.</li>
+      <li>INDEX REORGANIZE is too slow for big tables (many Tb) and for
+        COLUMNSTORE as well, this is why i focus on REBUILD only.</li>
+    </ul>
+    <p><strong>Work Log<br>
+      </strong></p>
+    <p>Is saved into a table <b>FRG_Log</b></p>
+    <p><br>
+    </p>
+  </body>
+</html>
