@@ -507,7 +507,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.07 for Enterprise Edition"
+Write-Host -ForegroundColor Green "Version 1.09 for Enterprise Edition, https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # all except nastro_logs

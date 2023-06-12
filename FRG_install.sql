@@ -1,4 +1,5 @@
-USE [Tuning]
+-- **************************************************
+USE [Your DBA database]
 GO
 
 /****** Object:  Table [dbo].[FRG_LOG]    Script Date: 07.05.2023 16:16:47 ******/
@@ -168,8 +169,7 @@ CREATE procedure [dbo].[FRG_FillFragmentationOne]
 as
   set nocount on
   declare @before int, @after int
-  select @before=TotalSpaceMb from FRG_last where Dbname=@db and Schemaname=@schemaname 
-    and TableName=@tablename and IndexName=@indexname and Partition=@par
+  select @before=TotalSpaceMb from FRG_last where Dbname=@db and Schemaname=@schemaname and TableName=@tablename and Partition=@par
   declare @sql nvarchar(4000)
   set @sql='use ['+@db+']; '
   set @sql=@sql+'declare @tid int, @iid int '
@@ -177,7 +177,7 @@ as
   set @sql=@sql+' select @iid=index_id from sys.indexes where object_id=@tid and name='''+@indexname+''''
   set @sql=@sql+' if @iid is null set @iid=0 '
   set @sql=@sql+'
-  insert into Tuning.dbo.FRG_Levels 
+  insert into ['+db_name()+'].dbo.FRG_Levels 
   select getdate(),database_id,@tid,@iid,partition,'''+@mode+''',
   fragment_count,avg_fragmentation_in_percent,avg_page_space_used_in_percent,page_count,avg_fragment_size_in_pages 
   from (select database_id,object_id,index_id,partition_number as partition,
@@ -192,7 +192,7 @@ as
   exec (@sql)
   set @sql=
 'USE ['+@db+']; 
-insert into Tuning.dbo.FRG_SizeStats
+insert into ['+db_name()+'].dbo.FRG_SizeStats
 select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
   SchemaName, TableName, IndexName, IndexType, object_id as table_id, index_id,
   sum(rows) as rows,
@@ -210,7 +210,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
   INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
   LEFT OUTER JOIN sys.schemas s ON t.schema_id = s.schema_id
-  WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4 and db_name()<>''Tuning''
+  WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4 
   ) Q
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
   where SchemaName='''+@SchemaName+''' and TableName='''+@TableName+''' and IndexName='''+@IndexName+'''
@@ -218,9 +218,6 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number
 '
   exec (@sql)
-  select @after=TotalSpaceMb from FRG_last where Dbname=@db and Schemaname=@schemaname 
-    and TableName=@tablename and IndexName=@indexname and Partition=@par
+  select @after=TotalSpaceMb from FRG_last where Dbname=@db and Schemaname=@schemaname and TableName=@tablename and Partition=@par
   select @before as [Before],@after as [After], @before-@after as delta
 GO
-
-
