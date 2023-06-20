@@ -79,6 +79,26 @@ insert into $Tuning.dbo.FRG_LOG (DbName,SchemaName,TableName,IndexName,Partition
   return
 }
 
+function CustomThrottling([string] $conn) {
+  return 0
+  <#
+  $lastrunage = 600 # must run no longer than 10 minutes
+  $jobname = "My Critical Job" 
+
+  $extraq = @"
+  select datediff(ss,max(msdb.dbo.agent_datetime(run_date,run_time)),getdate())
+  from msdb.dbo.sysjobhistory where step_id=0 and job_id in (
+    select job_id from msdb.dbo.sysjobs where name='$jobname')
+"@
+  $extraval = MSSQLscalar $conn $extraq
+  $extraval = $extraval[0]
+  Write-host "  Last executon of $jobname was $extraval sec ago"
+  $other = 0
+  if ($extraval -gt $lastrunage) { $other = 1 }  # yes, throttle
+  return $other
+  #>
+}
+
 function GETLOGSIZE([string] $db) {
   $q = @"
   USE [$db];
@@ -103,9 +123,12 @@ function GETLOGSIZE([string] $db) {
   $logpct = $logused * 100. / $logtotal
   $delay = $logsize.delays
   $logpctformatted = $logpct.tostring('###.##', [Globalization.CultureInfo]::CreateSpecificCulture('en-US'))
+
+
   Write-Host "Database $db LDF: Total $logtotal Mb, Free $logfree Mb, Used $logused Mb - $($logpctformatted)%"
   Write-Host "  AlwaysOn Queue $qlen Mb, Replica delay $delay sec, actual rebuild spids: $spidcnt"
-  return $logused, $logpct, $qlen
+  $other = CustomThrottling $connstr 
+  return $logused, $logpct, $qlen, $other
 }
 
 function fKILL([string] $connstr, [string] $db, [bool]$abortflag) {
@@ -191,7 +214,7 @@ with Rjobs (name,step_name,spid) as (
       from sysprocesses where blocked=@n and blocked<>@n) Q) A
     on A.j=J.job_id)
 select P.spid,
-  rtrim(isnull('Job '+Rjobs.name+'\'+Rjobs.step_name,' '+program_name))+nt_username as activity
+  ltrim(rtrim(isnull('Job '+Rjobs.name+'\'+Rjobs.step_name,' '+program_name))+' '+rtrim(nt_username)) as activity
   from sysprocesses P 
   LEFT OUTER JOIN Rjobs on Rjobs.spid=P.spid
   where P.blocked=@n and P.spid<>@n
@@ -215,7 +238,7 @@ with Rjobs (name,step_name,spid) as (
       from sysprocesses where blocked=@n and blocked<>@n) Q) A
     on A.j=J.job_id)
 select distinct P.spid,
-  rtrim(isnull('Job '+Rjobs.name+'\'+Rjobs.step_name,' '+program_name))+nt_username as activity
+  ltrim(rtrim(isnull('Job '+Rjobs.name+'\'+Rjobs.step_name,' '+program_name))+' '+rtrim(nt_username)) as activity
   from sysprocesses P 
   LEFT OUTER JOIN Rjobs on Rjobs.spid=P.spid
   where P.spid=@b
@@ -348,6 +371,12 @@ select distinct P.spid,
         fKILL $connstrX $db $False
         break
       }
+      elseif ($killnonresumable -eq 1) {
+        Write-host -ForegroundColor Yellow "  As KillNonResumable=1, connection will be killed and work will be lost"
+        LOG $db $schema $table $index $par "KILL" $msg
+        fKILL $connstrX $db $True
+        break
+      }
       else {
         Write-host -ForegroundColor Yellow "  Can't yield to lock without losing all work done (non resumable op). Use Ctrl/C for manual actions"
       }
@@ -355,19 +384,22 @@ select distinct P.spid,
 
     $throttle = 0
     if (($globalcnt % 10) -eq 1) {
-      $logused, $logpct, $qlen = GETLOGSIZE $db
-      if ((($maxlogused -gt 0) -and ($logused -gt $maxlogused)) `
-          -or (($maxlogusedpct -gt 0) -and ($logpct -gt $maxlogusedpct)) `
-          -or ($qlen -gt $maxqlen)) {
-        if ($origcmd.contains("RESUMABLE=ON")) {
-          Write-Host -ForegroundColor Yellow "  starting to throttle because of LDF size or Queue size"
-          LOG $db $schema $table $index $par "PAUSE-KILL" "throttling"
-          fKILL $connstrX $db $False
-          $throttle = 1
-          break
-        }
-        else {
-          Write-host -ForegroundColor Yellow "  LDF is too big, but operation is not resumable, we can't throttle it without losing the work done"
+      $logused, $logpct, $qlen, $other = GETLOGSIZE $db
+      if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME")) {
+        if ((($maxlogused -gt 0) -and ($logused -gt $maxlogused)) `
+            -or (($maxlogusedpct -gt 0) -and ($logpct -gt $maxlogusedpct)) `
+            -or ($qlen -gt $maxqlen) `
+            -or ($other -gt 0)) {
+          if ($origcmd.contains("RESUMABLE=ON")) {
+            Write-Host -ForegroundColor Yellow "  starting to throttle because of LDF size or Queue size"
+            LOG $db $schema $table $index $par "PAUSE-KILL" "throttling"
+            fKILL $connstrX $db $False
+            $throttle = 1
+            break
+          }
+          else {
+            Write-host -ForegroundColor Yellow "  LDF is too big, but operation is not resumable, we can't throttle it without losing the work done"
+          }
         }
       }
     }
@@ -507,7 +539,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.09 for Enterprise Edition, https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.10 for Enterprise Edition, https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # all except nastro_logs
@@ -531,6 +563,7 @@ $maxlogused = 200 * 1000 # Mb max log used throttling, 0 - no throttling
 $maxlogusedpct = 0 # max log pct used throttling, 0 - no throttling
 $maxqlen = 25000 # Mb max queue length of AlwaysOn to throttle. To disable set very big value
 $maxdailysize = 1000 * 1000 # 500 * 1000 # Mb max indexes reorged daily, 0 if not limited
+$killnonresumable = 0 # allow non resumable operations being killed with losing all work
 
 $Tuning = "DBAdb"
 
@@ -552,6 +585,7 @@ if ($settingfile -gt "") {
   $maxqlen = $json.maxqlen
   $maxdailysize = $json.maxdailysize
   $chunkminutes = $json.chunkminutes
+  $killnonresumable = $json.killnonresumable
   $Tuning = $json.workdb
 }
 
@@ -634,6 +668,8 @@ foreach ($r in $req) {
   $fragpct = $r.frag_pct
   $itype = $r.IndexType
   $totalpct = 100. * $workdone / $worksize
+  Write-Host ""
+  Write-Host "Next Index size is $siz Mb ..."
 
   if (($workdone -gt $maxdailysize) -and ($maxdailysize -gt 0)) {
     Write-Host "Terminated, processed size so far: $workdone, daily limit: $maxdailysize"
@@ -651,7 +687,7 @@ foreach ($r in $req) {
   Write-Host ""
   $log_throttled = 1
   while ($log_throttled -gt 0) {
-    $logused, $logpct, $qlen = GETLOGSIZE $db
+    $logused, $logpct, $qlen, $other = GETLOGSIZE $db
     if (($maxlogused -gt 0) -and ($logused -gt $maxlogused)) {
       Write-Host -ForegroundColor Yellow "  throttled, waiting for logused < $maxlogused Mb"
       Start-Sleep -Seconds 60
@@ -660,8 +696,12 @@ foreach ($r in $req) {
       Write-Host -ForegroundColor Yellow "  throttled, waiting for logusedpct < $maxlogusedpct %"
       Start-Sleep -Seconds 60
     }
-    elseif ($qlen -gt $maxqlen) {
-      Write-Host -ForegroundColor Yellow "  throttled, waiting for AlwaysOn queue < $maxqlen"
+    elseif ($qlen -gt $maxqlen/2) {
+      Write-Host -ForegroundColor Yellow "  throttled, waiting for AlwaysOn queue < $($maxqlen/2)"
+      Start-Sleep -Seconds 60
+    }
+    elseif ($other -gt 0) {
+      Write-Host -ForegroundColor Yellow "  throttled, waiting for custom condition"
       Start-Sleep -Seconds 60
     }
     else { $log_throttled = 0 }
@@ -754,10 +794,11 @@ foreach ($r in $req) {
       Start-Sleep -Seconds $relaxation
       $throttled = 1
       while ($throttled -gt 0) {
-        $logused, $logpct, $qlen = GETLOGSIZE $db
+        $logused, $logpct, $qlen, $other = GETLOGSIZE $db
         if ((($maxlogused -gt 0) -and ($logused -gt $maxlogused)) `
             -or (($maxlogusedpct -gt 0) -and ($logpct -gt $maxlogusedpct)) `
-            -or ($qlen -gt $maxqlen)) {
+            -or ($other -gt 0) `
+            -or ($qlen -gt $maxqlen/2)) {
           Write-Host "  still waiting..."
           Start-Sleep -Seconds $relaxation
         }

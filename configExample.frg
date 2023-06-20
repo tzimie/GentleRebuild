@@ -16,5 +16,6 @@
   maxqlen: 25000,
   maxdailysize: 1000000,
   chunkminutes: 0,
+  killnonresumable: 0,
   workdb: "Tuning"
 }

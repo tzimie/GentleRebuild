@@ -1,5 +1,4 @@
--- **************************************************
-USE [Your DBA database]
+USE [Tuning]
 GO
 
 /****** Object:  Table [dbo].[FRG_LOG]    Script Date: 07.05.2023 16:16:47 ******/
@@ -169,7 +168,8 @@ CREATE procedure [dbo].[FRG_FillFragmentationOne]
 as
   set nocount on
   declare @before int, @after int
-  select @before=TotalSpaceMb from FRG_last where Dbname=@db and Schemaname=@schemaname and TableName=@tablename and Partition=@par
+  select @before=TotalSpaceMb from FRG_last where Dbname=@db 
+    and Schemaname=@schemaname and TableName=@tablename and IndexName=@indexname and Partition=@par
   declare @sql nvarchar(4000)
   set @sql='use ['+@db+']; '
   set @sql=@sql+'declare @tid int, @iid int '
@@ -218,6 +218,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number
 '
   exec (@sql)
-  select @after=TotalSpaceMb from FRG_last where Dbname=@db and Schemaname=@schemaname and TableName=@tablename and Partition=@par
+  select @after=TotalSpaceMb from FRG_last where Dbname=@db 
+    and Schemaname=@schemaname and TableName=@tablename and IndexName=@indexname and Partition=@par
   select @before as [Before],@after as [After], @before-@after as delta
 GO

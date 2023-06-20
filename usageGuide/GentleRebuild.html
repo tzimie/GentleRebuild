@@ -85,6 +85,7 @@
       <em>&nbsp; maxqlen: 25000,</em><br>
       <em>&nbsp; maxdailysize: 1000000,</em><br>
       <em>&nbsp; chunkminutes: 0,</em><br>
+      <em>&nbsp; killnonresumable: 0,</em><br>
       <em>&nbsp; workdb: "DBA"</em><br>
       <em>}</em></p>
     <p><br>
@@ -112,14 +113,22 @@
           <li><strong>AllowNonResumable</strong> - size in Gb. If an index can't
             be rebuilt using <b>RESUMABLE=ON</b>, an attempt is made to rebuild
             it with <b>ONLINE=ON</b>. However, in that case process can't be
-            interrupted, and program can't yield to locks. This is why index
-            should be small enough. It index size is bigger than that value it
-            is skipped. Most HEAP indexes fall into that category.</li>
+            interrupted, and program can't yield to locks, unless <b>killnonresumable=1
+              </b>is specified. This is why index should be small enough. It
+            index size is bigger than that value it is skipped. Most HEAP
+            indexes fall into that category.</li>
           <li><strong>AllowNonOnline</strong> - size in Gb. Some indexes can't
             be rebuilt even using <b>ONLINE=ON</b>. Then they are rebuild
-            OFFLINE, locking other processes. They should be smaller than a
-            threshold, or they are skipped. Obviously <strong>AllowNonOnline</strong>
-            should be even smaller than <strong>AllowNonResumable&nbsp;</strong></li>
+            OFFLINE, locking other processes, and this process is not
+            interrupted unless <b>killnonresumable=1 </b>is specified. They
+            should be smaller than a threshold, or they are skipped. Obviously <strong>AllowNonOnline</strong>
+            should be even smaller than <strong>AllowNonResumable <br>
+            </strong></li>
+          <li><b>killnonresumable - </b>when 1, operations without RESUMABLE=ON
+            can be killed. You can increase values of <b>AllowNonResumable</b><i>
+            </i>and <b>AllowNonOnline</b> in hope that no locks will be
+            detected during the operation (so value 1 is an optimistic
+            strategy).</li>
         </ul>
       </li>
       <li>How to rebuild<br>
@@ -223,13 +232,35 @@
       <li>INDEX REORGANIZE is too slow for big tables (many Tb) and for
         COLUMNSTORE as well, this is why i focus on REBUILD only.</li>
     </ul>
-    <p><strong>Work Log<br>
+    <p><strong>Rebuild Log<br>
       </strong></p>
     <p>Is saved into a table <b>FRG_Log</b></p>
-    <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
+    <p><b>Change Log:</b></p>
+    <p><b>v1.10</b></p>
+    <ul>
+      <li>Introducing custom throttle events. Works similar to all other
+        throttling conditions (logs, locks, AlwaysOn). For an idea check
+        function <i>CustomThrottling</i></li>
+      <li>New config parameter: <b>killnonresumable: 0</b> (please add to
+        parameter file). When 1, operations without RESUMABLE=ON can be killed.
+        You can increase values of <b>AllowNonResumable</b><i> </i>and <b>AllowNonOnline</b>
+        in hope that no locks will be detected during the operation (so value 1
+        is an optimistic strategy).</li>
+      <li>Minor bug fix in <b>FRG_FillFragmentationOne</b> - please alter
+        procedure from FRG_install.sql file</li>
+    </ul>
+    <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
+
         target="_blank">https://www.actionatdistance.com/</a><b><br>
       </b></p>
     <p><br>
     </p>
+    <script>
+			if (!('IntersectionObserver' in window)) {
+				var script = document.createElement("script");
+				script.src = "https://raw.githubusercontent.com/w3c/IntersectionObserver/master/polyfill/intersection-observer.js";
+				document.getElementsByTagName('head')[0].appendChild(script);
+			}
   </body>
+  <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>
