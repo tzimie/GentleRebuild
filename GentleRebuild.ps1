@@ -79,29 +79,26 @@ insert into $Tuning.dbo.FRG_LOG (DbName,SchemaName,TableName,IndexName,Partition
   return
 }
 
-function CustomThrottling([string] $conn) {
-  return 0
-  <#
-  $lastrunage = 600 # must run no longer than 10 minutes
-  $jobname = "My Critical Job" 
+. $PSScriptRoot/custom.ps1
 
-  $extraq = @"
-  select datediff(ss,max(msdb.dbo.agent_datetime(run_date,run_time)),getdate())
-  from msdb.dbo.sysjobhistory where step_id=0 and job_id in (
-    select job_id from msdb.dbo.sysjobs where name='$jobname')
-"@
-  $extraval = MSSQLscalar $conn $extraq
-  $extraval = $extraval[0]
-  Write-host "  Last executon of $jobname was $extraval sec ago"
-  $other = 0
-  if ($extraval -gt $lastrunage) { $other = 1 }  # yes, throttle
-  return $other
-  #>
-}
-
-function GETLOGSIZE([string] $db) {
+function THROTTLER([string] $db) {
   $q = @"
   USE [$db];
+  declare @cpupct int
+  DECLARE @ts_now bigint = (SELECT cpu_ticks/(cpu_ticks/ms_ticks) FROM sys.dm_os_sys_info WITH (NOLOCK)); 
+    select @cpupct=avg([SQLCPU]) from (
+    SELECT SQLProcessUtilization AS [SQLCPU]
+    FROM (SELECT record.value('(./Record/@id)[1]', 'int') AS record_id, 
+			record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') 
+			AS [SystemIdle], 
+			record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') 
+			AS [SQLProcessUtilization], [timestamp] 
+	  FROM (SELECT [timestamp], CONVERT(xml, record) AS [record] 
+			FROM sys.dm_os_ring_buffers WITH (NOLOCK)
+			WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' 
+			AND record LIKE N'%<SystemHealth>%') AS x) AS y
+			where DATEADD(ms, -1 * (@ts_now - [timestamp]), GETDATE()) >= dateadd(mi,-10,getdate())
+			) z  
   SELECT 
     (select count(*) from master.dbo.sysprocesses where program_name like 'Defrag%') as spidcnt,
     convert(int,sum(size/128.0)) AS CurrentSizeMB,  
@@ -111,7 +108,8 @@ function GETLOGSIZE([string] $db) {
       where database_id=DB_ID('$db')) as qlen,
     (select isnull(max(case when redo_queue_size>0 then datediff(ss,last_hardened_time, getdate()) else 0 end),0)
       from sys.dm_hadr_database_replica_states 
-      where database_id=DB_ID('$db')) as delays
+      where database_id=DB_ID('$db')) as delays,
+    @cpupct as cpupct
     FROM sys.database_files WHERE type=1  
 "@  
   $logsize = MSSQLscalar $connstr $q
@@ -123,12 +121,16 @@ function GETLOGSIZE([string] $db) {
   $logpct = $logused * 100. / $logtotal
   $delay = $logsize.delays
   $logpctformatted = $logpct.tostring('###.##', [Globalization.CultureInfo]::CreateSpecificCulture('en-US'))
-
+  $cpupct = $logsize.cpupct
+  if ($cpupct -gt 100) { $cpupct = 100. } 
 
   Write-Host "Database $db LDF: Total $logtotal Mb, Free $logfree Mb, Used $logused Mb - $($logpctformatted)%"
-  Write-Host "  AlwaysOn Queue $qlen Mb, Replica delay $delay sec, actual rebuild spids: $spidcnt"
+  Write-Host "  CPU $cpupct%, AlwaysOn Queue $qlen Mb, Replica delay $delay sec, actual rebuild spids: $spidcnt"
   $other = CustomThrottling $connstr 
-  return $logused, $logpct, $qlen, $other
+  if ($other -eq 3) {
+    Write-host -ForegroundColor Red "  PANIC from Custom throttling! Exit!"
+  }
+  return $logused, $logpct, $qlen, $other, $cpupct, $spidnct
 }
 
 function fKILL([string] $connstr, [string] $db, [bool]$abortflag) {
@@ -163,6 +165,14 @@ select
   }
 }
 
+# returns point of no return value 
+# note that for MAXDOP=n there are typically n+1 threads, so $spidcnt=2 should never occur
+function PNRheuristic([int]$maxdop, [string]$itype) {
+  if ($maxdop -gt 9) { return 40. }
+  if ($itype -eq "CLUSTERED") { $heur = 75., 63., 63., 55., 45., 43., 42., 40., 37. }
+  else { $heur = 86., 74., 74., 70., 64., 55., 50., 45., 40. }
+  return $heur[$maxdop-1]
+}
 
 function ADEFRAG([string] $connstrX, [string]$sqlX, [string]$alter, `
     [string] $db, [string]$schema, [string]$table, [string]$index, [int]$par) {
@@ -189,35 +199,21 @@ function ADEFRAG([string] $connstrX, [string]$sqlX, [string]$alter, `
   $j = Start-Job -Name "SubDefragger" -ScriptBlock $async -ArgumentList $connstrX, $sqlX
   # at this point defrag is running asynchronously, and we check if any connections are locked by it
   $waitq = @"
-  declare @n int, @io int, @blk int, @b int
-  select @n=max(spid),@io=sum(physical_io) from master.dbo.sysprocesses where program_name like 'Defrag%'
+  declare @n int, @io int, @blk int, @b int, @spidcnt int
+  select @n=max(spid),@spidcnt=count(*),@io=sum(physical_io) from master.dbo.sysprocesses where program_name like 'Defrag%'
   select @b=max(blocked) from master.dbo.sysprocesses where spid=@n and blocked>0 and blocked<>@n
   select @blk=max(spid) from master.dbo.sysprocesses where blocked=@n and blocked<>spid and spid<>@n
   select isnull(@n,0) as defrag, isnull(@io,0) as io, isnull(@blk,0) as blk, isnull(@b,0) as wfor,
     -- (select percent_complete from sys.dm_exec_requests where session_id=@n) as pct -- sometimes doesnt work
-    (select max(percent_complete) from [$db].sys.index_resumable_operations) as pct
+    (select max(percent_complete) from [$db].sys.index_resumable_operations) as pct,
+    (select isnull(sum(logical_reads),0) from sys.dm_exec_requests where session_id=@n) as logreads,
+    @spidcnt as spidcnt
 "@
 
   $who = @"
 declare @n int
 select @n=max(spid) from master.dbo.sysprocesses where program_name like 'Defrag%';
-with Rjobs (name,step_name,spid) as (
-  select J.name,JS.step_name,A.spid from msdb.dbo.sysjobsteps JS
-  inner join msdb.dbo.sysjobs J on JS.job_id=J.job_id
-  inner join ( 
-    select spid,
-      convert(uniqueidentifier, SUBSTRING(p, 07, 2) + SUBSTRING(p, 05, 2) +
-      SUBSTRING(p, 03, 2) + SUBSTRING(p, 01, 2) + '-' + SUBSTRING(p, 11, 2) + SUBSTRING(p, 09, 2) + '-' +
-      SUBSTRING(p, 15, 2) + SUBSTRING(p, 13, 2) + '-' +  SUBSTRING(p, 17, 4) + '-' + SUBSTRING(p, 21,12)) as j
-    from (
-    select spid,substring(program_name,charindex(' 0x',program_name)+3,100) as p
-      from sysprocesses where blocked=@n and blocked<>@n) Q) A
-    on A.j=J.job_id)
-select P.spid,
-  ltrim(rtrim(isnull('Job '+Rjobs.name+'\'+Rjobs.step_name,' '+program_name))+' '+rtrim(nt_username)) as activity
-  from sysprocesses P 
-  LEFT OUTER JOIN Rjobs on Rjobs.spid=P.spid
-  where P.blocked=@n and P.spid<>@n
+select distinct P.spid from sysprocesses P where P.blocked=@n and P.spid<>@n
 "@
 
   $who2 = @"
@@ -252,10 +248,15 @@ select distinct P.spid,
   $stuckcnt = 0
   $globalcnt = 0
   $firstpctknown = -1
+  $pollinterval = 1
+  $maxspidcnt = 0
+  if ($siz -gt 3) { $pollinterval = 5 } 
+  if ($siz -gt 30) { $pollinterval = 15 }
   
   while ((Get-Job -id $j.id).State -eq "Running") {
     $globalcnt = $globalcnt + 1
-    Start-Sleep -Seconds 15
+    Start-Sleep -Seconds $pollinterval
+    $logreads = 0
     if ($itype -eq "CLUSTERED COLUMNSTORE") {
       $r = MSSQLscalar $connstrX @"
       use [$db];
@@ -272,8 +273,9 @@ select distinct P.spid,
     }
     else {
       $r = MSSQLscalar $connstrX $waitq
+      $logreads = $r.logreads
+      $spidnct = $r.spidcnt
     }
-    #$blocked = $r.cnt
     $defragspid = $r.defrag
     $pct = $r.pct
     if ($pct -is [DBNull]) { $pct = 0.0 }
@@ -289,7 +291,9 @@ select distinct P.spid,
         Write-host -ForegroundCOlor Yellow "Current index rebuild: $cmd"
         Write-host -ForegroundCOlor Yellow "Enter 1-character command:"
         Write-host -ForegroundCOlor Yellow "  A - ABORT  - aborts index rebuild immediately"
-        Write-host -ForegroundCOlor Yellow "  S - STOP   - exits script, but leaves index in rebuild state"
+        if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME")) {
+          Write-host -ForegroundCOlor Yellow "  S - STOP   - exits script, but leaves index in rebuild state"
+        }
         Write-host -ForegroundCOlor Yellow "  F - FINISH - finishes current index rebuild and then stops"
         Write-host -ForegroundCOlor Yellow "  K - SKIP   - aborts (skips) this index but continues with the rest of the work"
         Write-host -ForegroundCOlor Yellow "  C - CONTINUE"
@@ -314,18 +318,37 @@ select distinct P.spid,
       $Host.UI.RawUI.FlushInputBuffer()
     }    
 	
+
     if ( $wfor -eq 0 ) { $beinglocked = 0 }
     if ($blocked -gt 0) {
-      Write-Host -ForegroundColor Red "  the following processes are blocked and waiting:"
+      $newblocked = 0
+      $pnr = 101. # pnr - point of no return
+      try {
+        if ( -not ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME"))) {
+          $pct = 100 * $logreads / 2.0 / ($pages + 3000)
+          if ($pct -gt 100) { $pct = 99.9 }
+          if ($pct -lt 0) { $pct = 0.0 }
+          $pnr = PNRheuristic $spidnct $itype
+        } 
+        $elapsed = (get-date) - $started
+        [int]$left = ($elapsed.TotalSeconds / ($pct - $firstpctknown)) * (100 - $pct)
+      }
+      catch { $left = 0 }
+      if ($pct -lt 0.1) { $left = 0 }
+
+      Write-Host -ForegroundColor Red "  the following processes are blocked and waiting: "
       $vics = MSSQLscalar $connstrX $who
       foreach ($victim in $vics) {
-        $act = $victim.activity.replace("`n", ", ").replace("`r", ", ")
-        if ($act -eq "") {
-          $dbcc = MSSQLscalar $connstrX "DBCC INPUTBUFFER($($victim.spid))"
-          $act = $dbcc.EventInfo.Trim()
+        $act, $waitcategory, $waited, $waitlimit = VictimClassifier $connstrX $victim.spid
+        if (($waited + $left) -gt $waitlimit) { 
+          Write-Host -ForegroundColor Yellow "    $waitcategory spid=$($victim.spid) waited $($waited)s + $($left)s projected (max $waitlimit) runs ($act)"
+          $newblocked++ 
         }
-        Write-Host -ForegroundColor Yellow "    spid = $($victim.spid) runs ($act)"
+        else {
+          Write-Host "    $waitcategory spid=$($victim.spid) waited $($waited)s + $($left)s projected (max $waitlimit) runs ($act)"
+        }
       }
+      $blocked = $newblocked
     }
     if ($wfor -gt 0) {
       $beinglocked = $beinglocked + 1
@@ -360,7 +383,7 @@ select distinct P.spid,
       if (($blocked -eq 0) -and ($beinglocked -eq 0)) { 
         $msg = "process is stuck, no IO" 
       }
-      else { $msg = "process blocked: spid=$blocked, worker spid=$defragspid" }
+      else { $msg = "processes blocked: $blocked, worker spid=$defragspid" }
       LOG $db $schema $table $index $par "BLOCKED" $msg
       if (($io - $oldio) -gt 400) { $stuckcnt = 0 }
       elseif ( $beinglocked -eq 0 ) { $stuckcnt = $stuckcnt + 1 }
@@ -370,6 +393,9 @@ select distinct P.spid,
         LOG $db $schema $table $index $par "PAUSE-KILL" $msg
         fKILL $connstrX $db $False
         break
+      }
+      elseif ($pct -gt $pnr) {
+        Write-host "  Current progress $pctformatted % is behind point of no return: $pnr%"
       }
       elseif ($killnonresumable -eq 1) {
         Write-host -ForegroundColor Yellow "  As KillNonResumable=1, connection will be killed and work will be lost"
@@ -384,12 +410,23 @@ select distinct P.spid,
 
     $throttle = 0
     if (($globalcnt % 10) -eq 1) {
-      $logused, $logpct, $qlen, $other = GETLOGSIZE $db
+      $logused, $logpct, $qlen, $other, $cpupct, $spidcnt = THROTTLER $db
+      if ($other -eq 3) {
+        # panic
+        LOG $db $schema $table $index $par "PAUSE-KILL" "PANIC"
+        fKILL $connstrX $db $true
+        exit
+      }
+      if ($spidcnt -gt $maxspidcnt) { 
+        $maxspidcnt = $spidcnt 
+        LOG $db $schema $table $index $par "MAXDOP" "$maxspidcnt"
+      }      
       if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME")) {
         if ((($maxlogused -gt 0) -and ($logused -gt $maxlogused)) `
             -or (($maxlogusedpct -gt 0) -and ($logpct -gt $maxlogusedpct)) `
             -or ($qlen -gt $maxqlen) `
-            -or ($other -gt 0)) {
+            -or ($cpupct -gt $maxcpu) `
+            -or ($other -eq 2)) {
           if ($origcmd.contains("RESUMABLE=ON")) {
             Write-Host -ForegroundColor Yellow "  starting to throttle because of LDF size or Queue size"
             LOG $db $schema $table $index $par "PAUSE-KILL" "throttling"
@@ -435,7 +472,7 @@ select distinct P.spid,
           }
           if ($deadline -gt "" -and $etaval -ne $Null -and $pct -gt 3 -and $pct -lt 4) {
             if ($etaval -gt $dl) {
-              Write-Host -ForegroundColor yellow "Current index won't complete in teme before the deadline ($deadline)"
+              Write-Host -ForegroundColor yellow "Current index won't complete in time before the deadline ($deadline)"
               Write-Host -ForegroundColor yellow "Defrag Aborted. (this condition is verified when pct is between 3% and 4%)"
               fKILL $connstrX $db $True 
               exit
@@ -445,14 +482,12 @@ select distinct P.spid,
       }
       else {
         # no pct, OFFLINE REBUILD
-        $pct = $io / 2 * 100 / $pages
-        if ($pct -gt 99.) {
-          $pages = $pages * 1.1
-          $pct = $io / 2 * 100 / $pages
-        }
+        $pct = 100 * $logreads / 2.0 / ($pages + 3000)
         if ($pct -gt 100) { $pct = 99.9 }
+        if ($pct -lt 0) { $pct = 0.0 }
         $elapsed = (get-date) - $started
-        $left = ($elapsed.TotalSeconds / $pct) * (100 - $pct)
+        try { $left = ($elapsed.TotalSeconds / $pct) * (100 - $pct) } 
+        catch { $left = 10 }
         if ($left -gt 24 * 3600) { $left = 24 * 3600 }
         $eta = (Get-Date).AddSeconds($left).ToString("yyyy-MM-dd HH:mm:ss")
         $pctformatted = $pct.tostring('###.##', [Globalization.CultureInfo]::CreateSpecificCulture('en-US'))
@@ -515,7 +550,13 @@ select distinct P.spid,
     LOG $db $schema $table $index $par "COMPLETED" ""
     Write-Host "Success!!! ($siz Mb) Recalculating stats..."
     $sql = "exec $Tuning.dbo.FRG_FillFragmentationOne '$db','$schema','$table','$index',$par"
-    $delta = MSSQLquery $connstr $sql
+    try {
+      $delta = MSSQLquery $connstr $sql
+    }
+    catch {
+      # retry in case of deadlock
+      $delta = MSSQLquery $connstr $sql
+    }
     $before = $delta.Before
     $after = $delta.After
     $diff = $delta.delta
@@ -539,10 +580,10 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.10 for Enterprise Edition, https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.2, check https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
-# all except nastro_logs
+# setting, defaults if setting file is not provided
 $server = "servername"
 $dbname = "db1,db2" # * means all, comma-separated list is also accepted
 
@@ -555,38 +596,31 @@ $extrafilter = " and SchemaName not in ('tmp','import')"
 
 # options
 $deadline = "" # HH:mm when already passed today, tomorrow is assumed. "" for no deadline
-$rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=4" # Additional options, for example, MAXDOP, but NOT MAX_DURATION
+$rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=4" # Additional options, for example, MAXDOP, but NOT MAX_DURATION and not SORT_IN_TEMPDB
 $columnstoreopt = "MAXDOP=1" # for column store
 $relaxation = 50 # period we wait before attempts, giving time for other processes to complete
-$chunkminutes = 30 # max period of continuous work, this is an artificial MAX_DURATION. use it, not SQL server setting
+$chunkminutes = 1000000 # max period of continuous work, this is an artificial MAX_DURATION. use it, not SQL server setting
+$maxcpu = 80 # max cpu pct to throttle
 $maxlogused = 200 * 1000 # Mb max log used throttling, 0 - no throttling
 $maxlogusedpct = 0 # max log pct used throttling, 0 - no throttling
 $maxqlen = 25000 # Mb max queue length of AlwaysOn to throttle. To disable set very big value
 $maxdailysize = 1000 * 1000 # 500 * 1000 # Mb max indexes reorged daily, 0 if not limited
 $killnonresumable = 0 # allow non resumable operations being killed with losing all work
-
+$forceoffline = 0 # force non online rebuild
+$offlineretries = 3 # number of retries because of locks before skipping an index
+$sortintempdb = 100000 # Mb, for OFFLINE rebuilds, max size when SORT_IN_TEMPDB can be used. use 0 to disable SORT_IN_TEMPDB
 $Tuning = "DBAdb"
 
 # get params
 if ($settingfile -gt "") {
-  $json = Get-Content "$settingfile.frg" | Out-String | ConvertFrom-Json
-  $server = $json.server
-  $dbname = $json.dbname
-  $allowNonResumable = $json.allowNonResumable
-  $allowNonOnline = $json.allowNonOnline
-  $threshold = $json.threshold
-  $extrafilter = $json.extrafilter
-  $deadline = $json.deadline
-  $rebuildopt = $json.rebuildopt
-  $columnstoreopt = $json.columnstoreopt
-  $relaxation = $json.relaxation
-  $maxlogused = $json.maxlogused
-  $maxlogusedpct = $json.maxlogusedpct
-  $maxqlen = $json.maxqlen
-  $maxdailysize = $json.maxdailysize
-  $chunkminutes = $json.chunkminutes
-  $killnonresumable = $json.killnonresumable
-  $Tuning = $json.workdb
+
+  . ("$PSScriptRoot/$settingfile.ps1")
+  $Tuning = $Workdb
+}
+
+if ($Tuning -eq "TOCHANGE") {
+  Write-Host -ForegroundColor Red "It is unlikely that you DBA database is called 'TOCHANGE'. Please set workdb to DBA database where FRG script is installed"
+  exit
 }
 
 Write-Host "Server=$server"
@@ -600,11 +634,29 @@ if ($deadline -gt "") {
   Write-Host "Deadline: $dl" 
 }
 
-$connstr = "Server=$server;Database=$Tuning;Trusted_Connection=True;" # to tuning database
+$connstr = "Server=$server;Database=$Tuning;Trusted_Connection=True;" # to DBA database
 $r = MSSQLscalar $connstr "select isnull((select max(spid) from master.dbo.sysprocesses where program_name like 'Defrag%'),0) as spid"
 $fragspid = $r.spid
 if ($fragspid -gt 0) {
   Write-Host -ForegroundColor Red "Defrag spid $fragspid is already running (label Defrag)"
+  exit
+}
+
+$r = MSSQLscalar $connstr "select count(*) as cnt from sysobjects where name like 'FRG_%'"
+if ($r.cnt -eq 0) {
+  Write-Host -ForegroundColor Red "Please apply FRG_install.sql to your $Tuning database"
+  exit
+}
+
+$r = MSSQLscalar $connstr "select count(*) as cnt from FRG_SizeStats"
+if ($r.cnt -eq 0) {
+  Write-Host -ForegroundColor Red "Please run FRG_FillSizeStats in $Tuning database to collect index size statistics"
+  exit
+}
+
+$r = MSSQLscalar $connstr "select count(*) as cnt from FRG_Levels"
+if ($r.cnt -eq 0) {
+  Write-Host -ForegroundColor Red "Please run FRG_FillFragmentation in $Tuning database to collect index fragmentation statistics"
   exit
 }
 
@@ -615,9 +667,9 @@ select case
   else 0 end as ent
 "@ ).ent
 if ($ent -eq 0) { 
-  Write-Host "Standard Edition - bye bye, sorry" 
-  exit
+  Write-Host "Warning: Standard Edition detected" 
 }
+if ($forceoffline -eq 1) { $ent = 0 }
 
 $where = " where 1=1 "
 $where = $where + " and frag_pct>$threshold "
@@ -687,8 +739,12 @@ foreach ($r in $req) {
   Write-Host ""
   $log_throttled = 1
   while ($log_throttled -gt 0) {
-    $logused, $logpct, $qlen, $other = GETLOGSIZE $db
-    if (($maxlogused -gt 0) -and ($logused -gt $maxlogused)) {
+    $logused, $logpct, $qlen, $other, $cpupct, $spidcnt = THROTTLER $db
+    if ($cpupct -gt $maxcpu) {
+      Write-Host -ForegroundColor Yellow "  throttled, waiting cpu < $maxcpu"
+      Start-Sleep -Seconds 60      
+    }
+    elseif (($maxlogused -gt 0) -and ($logused -gt $maxlogused)) {
       Write-Host -ForegroundColor Yellow "  throttled, waiting for logused < $maxlogused Mb"
       Start-Sleep -Seconds 60
     }
@@ -696,9 +752,12 @@ foreach ($r in $req) {
       Write-Host -ForegroundColor Yellow "  throttled, waiting for logusedpct < $maxlogusedpct %"
       Start-Sleep -Seconds 60
     }
-    elseif ($qlen -gt $maxqlen/2) {
+    elseif ($qlen -gt $maxqlen / 2) {
       Write-Host -ForegroundColor Yellow "  throttled, waiting for AlwaysOn queue < $($maxqlen/2)"
       Start-Sleep -Seconds 60
+    }
+    elseif ($other -eq 3) {
+      exit
     }
     elseif ($other -gt 0) {
       Write-Host -ForegroundColor Yellow "  throttled, waiting for custom condition"
@@ -720,14 +779,12 @@ foreach ($r in $req) {
   # $result: 0 OK, 1 KILLED, 2 PAUSED 3 MAXDURATION 4 CANT REBUILD RESUMABLE 5 CANT REBUILD ONLINE
   # strange, but -1 is also OK
   $retrycnt = 0
-  if ($itype -eq "HEAP") {
-    $cmd = "USE [$db]; ALTER TABLE [$schema].[$tab] REBUILD "
+  if (($itype -eq "CLUSTERED COLUMNSTORE") -and ($ent -eq 0)) {
+    $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] REBUILD "
+    if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
+    if ($columnstoreopt -gt "") { $cmd = $cmd + " WITH (" + $columnstoreopt + ")" }
     $op = "REBUILD"
-    $pausing = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab]"
-    $cmd = $cmd + " WITH (ONLINE=ON"
-    $op = $op + "-O"
-    if ($rebuildopt -gt "") { $cmd = $cmd + "," + $rebuildopt }
-    $cmd = $cmd + ")"
+    $pausing = ""
   }
   elseif ($itype -eq "CLUSTERED COLUMNSTORE") {
     $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] REBUILD "
@@ -737,6 +794,31 @@ foreach ($r in $req) {
     $cmd = $cmd + " WITH (ONLINE=ON"
     $op = $op + "-OR"
     if ($columnstoreopt -gt "") { $cmd = $cmd + "," + $columnstoreopt } 
+    $cmd = $cmd + ")"
+  }
+  elseif (($ent -eq 0) -and ($itype -eq "HEAP")) {
+    $cmd = "USE [$db]; ALTER TABLE [$schema].[$tab] REBUILD "
+    if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
+    if (($rebuildopt -gt "") -and ($siz -lt $sortintempdb)) { $cmd = $cmd + " WITH (" + $rebuildopt + ",SORT_IN_TEMPDB=ON)" }
+    elseif ($rebuildopt -gt "") { $cmd = $cmd + " WITH (" + $rebuildopt + ")" }
+    $op = "REBUILD"    
+    $pausing = ""
+  }
+  elseif ($ent -eq 0) {
+    $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] REBUILD "
+    if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
+    if (($rebuildopt -gt "") -and ($siz -lt $sortintempdb)) { $cmd = $cmd + " WITH (" + $rebuildopt + ",SORT_IN_TEMPDB=ON)" }
+    elseif ($rebuildopt -gt "") { $cmd = $cmd + " WITH (" + $rebuildopt + ")" }
+    $op = "REBUILD"
+    $pausing = ""
+  }
+  elseif ($itype -eq "HEAP") {
+    $cmd = "USE [$db]; ALTER TABLE [$schema].[$tab] REBUILD "
+    $op = "REBUILD"
+    $pausing = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab]"
+    $cmd = $cmd + " WITH (ONLINE=ON" 
+    $op = $op + "-O"
+    if ($rebuildopt -gt "") { $cmd = $cmd + "," + $rebuildopt }
     $cmd = $cmd + ")"
   }
   else {
@@ -776,7 +858,11 @@ foreach ($r in $req) {
       Write-Host -ForegroundColor Yellow "  wait $relaxation seconds between retries"
       LOG $db $schema $tab $ind $par "WAIT" ""
       Start-Sleep -Seconds $relaxation
-      continue
+      if (-not (($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME"))) -and ($retrycnt -gt $offlineretries)) { 
+        Write-host -ForegroundColor Red "Giving up after $retrycnt retries"
+        break 
+      }
+      else { continue }
     }
     if (($result -eq 2) -or ($result -eq 3)) {
       # PAUSED
@@ -794,11 +880,20 @@ foreach ($r in $req) {
       Start-Sleep -Seconds $relaxation
       $throttled = 1
       while ($throttled -gt 0) {
-        $logused, $logpct, $qlen, $other = GETLOGSIZE $db
+        $logused, $logpct, $qlen, $other, $cpupct, $spidcnt = THROTTLER $db
+        if ($other -eq 3) {
+          # panic
+          $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] ABORT"
+          write-Host -ForegroundColor Yellow $cmd
+          $status = MSSQLexec $connstr $cmd
+          LOG "" "" "" "" 0 "PANIC" ""
+          exit
+        }
         if ((($maxlogused -gt 0) -and ($logused -gt $maxlogused)) `
             -or (($maxlogusedpct -gt 0) -and ($logpct -gt $maxlogusedpct)) `
             -or ($other -gt 0) `
-            -or ($qlen -gt $maxqlen/2)) {
+            -or ($cpupct -gt $maxcpu) `
+            -or ($qlen -gt $maxqlen / 2)) {
           Write-Host "  still waiting..."
           Start-Sleep -Seconds $relaxation
         }

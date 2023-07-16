@@ -7,11 +7,13 @@
   <body> <img src="defraglogo.png" alt="" title="DefragLogo">
     <p><b>GentleRebuild</b> is Powershell script for online index rebuild in
       high-load clustered MSSQL databases working 24/7 - <b>Enterprise Edition
-      </b>is expected, Standard Edition is not supported. Script executes <strong>ALTER
-        INDEX ... REBUILD</strong> in a safe controlled mode using 2 threads:
-      one thread is executing the command while second one is checking the
-      environment for several conditions. What is controlled:</p>
+      </b>is preferred, <b>Standard Edition</b> is supported with limitations.
+      Script executes <strong>ALTER INDEX ... REBUILD</strong> in a safe
+      controlled mode using 2 threads: one thread is executing the command while
+      second one is checking the environment for several conditions. What is
+      controlled:</p>
     <ul>
+      <li>High CPU</li>
       <li>Too active index rebuild activity can overflow the <b>LDF</b> file -
         transaction log backup could be not fast enough to flush the generated
         log to the disk</li>
@@ -49,7 +51,7 @@
         powershell program doesn't analyze the fragmentation level during it's
         run, but relies on the previously collected information. First parameter
         of this stored procedure allows you to limit the analysis by a single
-        database. By defaul all non system databases are analyzed.</li>
+        database. By default all non system databases are analyzed.</li>
       <li>When script finishes the index rebuild, it updates the size and
         fragmentation info using the stored procedure <strong>FRG_FillFragmentationOne</strong>.
         Typically fragmentation level drops below the threshold, so on the next
@@ -67,29 +69,9 @@
     <p>When you run powershell script, supply a configuration file name as first
       parameter, for example:</p>
     <p><em>powershell .\GentleRebuild.ps1 param</em></p>
-    <p>where param.frg - is JSON files with parameters, for example:</p>
-    <p><em>{</em><br>
-      <em>&nbsp; server: "myServer",</em><br>
-      <em>&nbsp; dbname: "db1,db2,anotherDb",</em></p>
-    <p><em>&nbsp; allowNonResumable: 50,</em><br>
-      <em>&nbsp; allowNonOnline: 10,</em><br>
-      <em>&nbsp; threshold: 40,</em><br>
-      <em>&nbsp; extrafilter: " and SchemaName not in ('tmp','import') and
-        page_count&gt;100 and TotalSpaceMb&lt;1000000",</em></p>
-    <p><em>&nbsp; deadline: "23:00",</em><br>
-      <em>&nbsp; rebuildopt: "DATA_COMPRESSION=PAGE,MAXDOP=2",</em><br>
-      <em>&nbsp; columnstoreopt: "MAXDOP=1",</em><br>
-      <em>&nbsp; relaxation: 30,</em><br>
-      <em>&nbsp; maxlogused: 200000,</em><br>
-      <em>&nbsp; maxlogusedpct: 0,</em><br>
-      <em>&nbsp; maxqlen: 25000,</em><br>
-      <em>&nbsp; maxdailysize: 1000000,</em><br>
-      <em>&nbsp; chunkminutes: 0,</em><br>
-      <em>&nbsp; killnonresumable: 0,</em><br>
-      <em>&nbsp; workdb: "DBA"</em><br>
-      <em>}</em></p>
-    <p><br>
-      <b>All parameters in detail:</b></p>
+    <p>where param.ps1 - is powershell files setting parameter variables inside.
+      Check config_example.ps1</p>
+    <b>All parameters in detail:</b>
     <ul>
       <li>Where and what to rebuild:<br>
         <ul>
@@ -124,11 +106,6 @@
             should be smaller than a threshold, or they are skipped. Obviously <strong>AllowNonOnline</strong>
             should be even smaller than <strong>AllowNonResumable <br>
             </strong></li>
-          <li><b>killnonresumable - </b>when 1, operations without RESUMABLE=ON
-            can be killed. You can increase values of <b>AllowNonResumable</b><i>
-            </i>and <b>AllowNonOnline</b> in hope that no locks will be
-            detected during the operation (so value 1 is an optimistic
-            strategy).</li>
         </ul>
       </li>
       <li>How to rebuild<br>
@@ -151,7 +128,9 @@
           </li>
           <li><strong>rebuildopt </strong>- rebuild options for ordinary
             indexes (CLUSTERED, NONCLUSTERED, HEAP). Don't use MAX_DURATION, use
-            <b>chunkminutes </b>instead. Regarding MAXDOP:
+            <b>chunkminutes </b>instead. Don't use SORT_IN_TEMPDB: for
+            RESUMABLE it is not supported, for offline rebuilds there is a s
+            special parameter <b>sortintempdb</b>. Regarding MAXDOP:
             <ul>
               <li>MAXDOP = 1 - slowly without much pressure on a server</li>
               <li>MAXDOP = 2 - normal work, recommended option</li>
@@ -167,6 +146,8 @@
           <li><strong>relaxation</strong> - number of seconds process sleeps
             when throttled by throttling conditions (LDF use size, AlwaysOn
             queues, locking)</li>
+          <li><b>maxcpu</b> - percentage of the CPU for the last 10 minutes,
+            process is throttled if cpu is higher</li>
           <li><strong>maxlogused</strong> - size in Mb used in log (LDF). When
             used space is greater than this value, script stops (throttles) for
             (relaxation) seconds and waits until the condition is cleared
@@ -184,8 +165,22 @@
             started. 0 means 'don't check'</li>
           <li><strong>chunkminutes</strong> - similar to MAX_DURATION, but is
             implemented using Powershell. 0 means no max duration, unless there
-            are throttling conditions. Time is counted since last throttling.<strong><br>
-            </strong></li>
+            are throttling conditions. Time is counted since last throttling.<strong></strong></li>
+          <li><b>killnonresumable - </b>when 1, operations without RESUMABLE=ON
+            can be killed. You can increase values of <b>AllowNonResumable</b><i>
+            </i>and <b>AllowNonOnline</b> in hope that no locks will be
+            detected during the operation (so value 1 is an optimistic
+            strategy).</li>
+          <li><b>forceoffline</b> - Enterprise edition works like Standard one,
+            all rebuilds are offline</li>
+          <li><b>sortintempdb</b> - for offline rebuilds only, size in Mb. if
+            index is smaller than that size, SORT_IN_TEMPDB=ON is used. It index
+            is too big (bigger than the value provided) it will be OFF.
+            Resumable and online rebuilds can't use this option.</li>
+          <li><b>offlineretries </b>- when rebuild is not resumable and <b>killnonresumable=1</b>,
+            index operation can be aborted when there are locks. Script will
+            retry the operation soon after. But after the specified number of
+            retries if would give up and skip this index</li>
         </ul>
       </li>
     </ul>
@@ -193,7 +188,8 @@
     <p>By pressing Ctrl/C while script is progressing (not throttling) you enter
       an interactive menu (might take up to 15 seconds for the menu to appear):</p>
     <img src="interactivemenu.png" alt=""><br>
-    <p>It displayes the current rebuild command and waits for a single character
+    <p>(for non-resumable index rebuilds, option S - STOP is not available)</p>
+    <p>It displays the current rebuild command and waits for a single character
       command. Don't leave it waiting for a command - it such state throttling
       conditions are not controlled. After command 'S' you can change the
       parameters and restart the script, it would continue from the same index.
@@ -230,7 +226,31 @@
         could suffer because of the "rewinding effect"</li>
       <li>COLUMNSTORE support is experimental.</li>
       <li>INDEX REORGANIZE is too slow for big tables (many Tb) and for
-        COLUMNSTORE as well, this is why i focus on REBUILD only.</li>
+        COLUMNSTORE as well, this is why I focus on REBUILD only.</li>
+    </ul>
+    <p><br>
+      <strong>Standard Edition: tips and tricks<br>
+      </strong> </p>
+    <ul>
+      <li>All throttling conditions are checked only between the operations,
+        when a new operation starts. Exception: when other processes are locked
+        and <b>killnonresumable=1</b></li>
+      <li>use <b>killnonresumable=0</b> for "hard" defrag which ignores locks,
+        when you have a maintenance window (use <b>deadline</b> parameter as
+        well)</li>
+      <li>you can benefit from setting <b>sortintempdb</b> value to make
+        rebuild faster, also you can increase MAXDOP to reduce the probability
+        of locks</li>
+      <li>set <b>offlineretries</b> to skip "hot" indexes which can't be been
+        rebuilt without causing too much trouble</li>
+      <li>the most important is defining the custom procedure VictimClassifier,
+        which allows you defide different categories for different connections,
+        and for each category to define how much it can wait for locks (for
+        example, job named XXX can wait for 1 hour, job YYY for 10 minutes,
+        other processes are interactive and process should yield immediately)</li>
+      <li>progress indicator is available for nonresumable operations - even it
+        is not provided by SQL server, quite accurate estimation is done based
+        on other system counters</li>
     </ul>
     <p><strong>Rebuild Log<br>
       </strong></p>
@@ -249,18 +269,69 @@
       <li>Minor bug fix in <b>FRG_FillFragmentationOne</b> - please alter
         procedure from FRG_install.sql file</li>
     </ul>
-    <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
-
+    <p><b><b>v1.11</b> </b></p>
+    <ul>
+      <li><b>maxcpu</b> parameter and throttling based on cpu for the last 10
+        minutes.</li>
+      <li>partial support of the Standard Edition - all operations are offline,
+        throttling is between operations only, with the exception of having
+        other processes locked. If <b>killnonresumable=1</b>, operation will be
+        aborted but will be retried <b>offlineretries</b> times.</li>
+      <li>using <b>forceoffline=1 </b>you can force Enterprise Edition to work
+        as Standard one, all rebuilds will be offline</li>
+    </ul>
+    <p><b><b>v1.12</b> </b> </p>
+    <ul>
+      <li><b>sortintempdb</b> parameter uses SORT_IN_TEMPDB=ON if rebuild is
+        offline (option is not compatible with online and resumable operations),
+        and if index is smaller the value of <b>sortintempdb</b> (value in Mb).
+        For example, value 100000 means that indexes smaller than 100Gb would
+        use SORT_IN_TEMPDB=ON</li>
+      <li>custom throttle events can now return values 1 (soft throttle, only
+        between operations, so indexes are not left in resumable state) and 2 -
+        hard, throttle immediately.</li>
+      <li>custom throttle events and other throttling conditions affect offline
+        rebuilds only between the operations, exception are locking.</li>
+      <li>quite accurate progress percentage estimation for non-resumable
+        operations</li>
+      <li>sanity checks before run (that FRG_ tables exist and are populated)</li>
+    </ul>
+    <p><b> </b></p>
+    <p><b><b>v1.13</b> </b> </p>
+    <ul>
+      <li><b>VictimClassifier </b>is used extensively on <b>Standard Edition.
+        </b>Kills rebuilds which lock other processes, when:<b><br>
+        </b></li>
+      <ul>
+        <li>victim process waits longer than limit, given by VictimClassifier</li>
+        <li>victim process wait time + projected (estimated) rebuild time to
+          completion (based on percentage) will be longer than limit, given by
+          VictimClassifier</li>
+        <li>but (in both cases) the percentage done is not behind "point of no
+          return", where rollback would take longer than completion. Depending
+          on the actual MAXDOP, it is 75%-50% (the higher MAXDOP, the lower the
+          point of no return)</li>
+      </ul>
+    </ul>
+    <p><b><b><b><b>v1.13</b> </b> </b></b></p>
+    <ul>
+      <li>2 custom functions, <b>CustomThrottling </b>and<b> VictimClassifier
+        </b>are extracted into a separate file custom.ps1<b><br>
+        </b></li>
+    </ul>
+    <p><b><b>v1.2</b></b></p>
+    <ul>
+      <li>Configuration file now is no longer JSON, but *.ps1. Reasons<b><br>
+        </b></li>
+      <ul>
+        <li>I do need comments in configuration file</li>
+        <li>I do need multi-line strings (here-strings) for the filters.</li>
+        <li>YAML is not natively supported by Powershell</li>
+      </ul>
+    </ul>
+    <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
         target="_blank">https://www.actionatdistance.com/</a><b><br>
       </b></p>
     <p><br>
     </p>
-    <script>
-			if (!('IntersectionObserver' in window)) {
-				var script = document.createElement("script");
-				script.src = "https://raw.githubusercontent.com/w3c/IntersectionObserver/master/polyfill/intersection-observer.js";
-				document.getElementsByTagName('head')[0].appendChild(script);
-			}
-  </body>
-  <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>
