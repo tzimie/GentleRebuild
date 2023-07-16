@@ -34,7 +34,7 @@ function VictimClassifier([string] $conn, [int] $spid) {
   # build category based on info above
   $cat = "INTERACTIVE"
   if ($cmd -like '*UPDATE*STATISTICS*') { $cat = "STATS" }
-  elseif ($job -like "*ImportInvoicesMerchantData*") { $cat = "CRITJOB" }
+  elseif ($job -like "*ImportantJob*") { $cat = "CRITJOB" }
   elseif ($job -gt "") { 
     $cat = "JOB" 
     $cmd = "Job $job"
