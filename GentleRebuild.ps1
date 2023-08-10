@@ -1,4 +1,4 @@
-param ([string] $settingfile)
+param ([string] $settingfile) 
 
 function MSSQLquery([string] $connstr, [string]$sql) {
   $sqlConn = New-Object System.Data.SqlClient.SqlConnection

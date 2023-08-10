@@ -1,4 +1,4 @@
-# this is settings file for gentle rebuild
+# this is settings file for gentle rebuild 
 
 # where to rebuild, MUST CHANGE!!!
 $server = "your server" # must change
