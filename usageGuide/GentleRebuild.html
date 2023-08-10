@@ -40,18 +40,18 @@
     <ul>
       <li>Execute script <strong>FRG_install.sql</strong> on a "DBA" database.
         In almost any environment there is dedicated "DBA" database - DBA,
-        SYSSYS, Optimization, names differ. In the worse case, if there is no
+        SYSSYS, Optimization, names differ. In the worst case, if there is no
         such database, use msdb.</li>
       <li>Execute procedure <strong>FRG_FillSizeStats</strong> to fill a table
         with object list and sizes. This procedure usually finishes it's work it
         few seconds</li>
       <li>Execute procedure<strong> FRG_FillFragmentation</strong> to analyze a
-        level of fragmentation. Default mode is the fastest one, '<strong>LIMITED</strong>',
-        however, it could take up to a day to analyze 30-100Tb. This is why
-        powershell program doesn't analyze the fragmentation level during it's
-        run, but relies on the previously collected information. First parameter
-        of this stored procedure allows you to limit the analysis by a single
-        database. By default all non system databases are analyzed.</li>
+        level of fragmentation. It could take up to a day to analyze 30-100Tb.
+        This is why powershell program doesn't analyze the fragmentation level
+        during it's run, but relies on the previously collected information.
+        First parameter of this stored procedure allows you to limit the
+        analysis by a single database. By default all non system databases are
+        analyzed.</li>
       <li>When script finishes the index rebuild, it updates the size and
         fragmentation info using the stored procedure <strong>FRG_FillFragmentationOne</strong>.
         Typically fragmentation level drops below the threshold, so on the next
@@ -92,6 +92,7 @@
               <li>exceptions by SchemaName, Tablename, IndexName etc</li>
             </ul>
           </li>
+          <li><strong>Reorganize</strong> - 0 or 1. use 1 for INDEX REORGANIZE.</li>
           <li><strong>AllowNonResumable</strong> - size in Gb. If an index can't
             be rebuilt using <b>RESUMABLE=ON</b>, an attempt is made to rebuild
             it with <b>ONLINE=ON</b>. However, in that case process can't be
@@ -143,6 +144,7 @@
           </li>
           <li><strong>columnstoreopt</strong> - similar options for COLUMNSTORE
             indexes (COLUMNSTORE index support is experimental)</li>
+          <li><strong>reorganizeopt</strong> - options for INDEX REORGANIZE</li>
           <li><strong>relaxation</strong> - number of seconds process sleeps
             when throttled by throttling conditions (LDF use size, AlwaysOn
             queues, locking)</li>
@@ -188,7 +190,10 @@
     <p>By pressing Ctrl/C while script is progressing (not throttling) you enter
       an interactive menu (might take up to 15 seconds for the menu to appear):</p>
     <img src="interactivemenu.png" alt=""><br>
-    <p>(for non-resumable index rebuilds, option S - STOP is not available)</p>
+    <p>For non-resumable index rebuilds, option S - STOP is not available</p>
+    <p>For REORGANIZE, there is an extra option - R - stops and recalculates new
+      stats, because on REORGANIZE already done, then process goes to the nest
+      index in a list.</p>
     <p>It displays the current rebuild command and waits for a single character
       command. Don't leave it waiting for a command - it such state throttling
       conditions are not controlled. After command 'S' you can change the
@@ -251,6 +256,21 @@
       <li>progress indicator is available for nonresumable operations - even it
         is not provided by SQL server, quite accurate estimation is done based
         on other system counters</li>
+    </ul>
+    <p><br>
+      <strong>INDEX REORGANIZE: tips and tricks<br>
+      </strong> </p>
+    <ul>
+      <li>this operation is resumable as well, it works on Standard Edition, but
+        it is 3-5 time slows then INDEX REBUIILD on non-clustered indexes and up
+        to 20x on CLUSTERED</li>
+      <li>there is some estimation of the percentage of the work done for
+        REORGANIZE, it is +/- 15% accurate in most cases</li>
+      <li>sometimes the reorganized area hits the 'hot spot' where data is
+        inserted on a systems under heavy load, and REORGANIZE never ends. For
+        that reason if estimated percentage reaches 120%, process is terminated.</li>
+      <li>reorganize is throttled the same way other operations. It can cause
+        locking - typically on schema locks.</li>
     </ul>
     <p><strong>Rebuild Log<br>
       </strong></p>
@@ -319,7 +339,7 @@
         </b>are extracted into a separate file custom.ps1<b><br>
         </b></li>
     </ul>
-    <p><b><b>v1.2</b></b></p>
+    <b><b>v1.2</b></b>
     <ul>
       <li>Configuration file now is no longer JSON, but *.ps1. Reasons<b><br>
         </b></li>
@@ -329,9 +349,27 @@
         <li>YAML is not natively supported by Powershell</li>
       </ul>
     </ul>
+    <b><b><b><b><b><b><b><b><b><b>v1.23</b> </b> </b></b> </b></b>
+          </b></b></b></b>
+    <ul>
+      <li>new heuristics for INDEX REBUILD OFFLINE<b><br>
+        </b></li>
+    </ul>
+    <p><b><b></b></b></p>
+    <b><b><b><b>v1.26</b> </b> </b></b>
+    <ul>
+      <li>index reorganize now supported with progress estimation</li>
+      <li>use option $reorganize = 1</li>
+    </ul>
+    <ul>
+      <ul>
+      </ul>
+    </ul>
     <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
         target="_blank">https://www.actionatdistance.com/</a><b><br>
       </b></p>
     <p><br>
     </p>
+</body>
+  <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>

@@ -166,13 +166,37 @@ select
 }
 
 # returns point of no return value 
-# note that for MAXDOP=n there are typically n+1 threads, so $spidcnt=2 should never occur
+# note that for MAXDOP=n there are typically n+1 threads, so $maxdop=2 should never occur
 function PNRheuristic([int]$maxdop, [string]$itype) {
   if ($maxdop -gt 9) { return 40. }
   if ($itype -eq "CLUSTERED") { $heur = 75., 63., 63., 55., 45., 43., 42., 40., 37. }
   else { $heur = 86., 74., 74., 70., 64., 55., 50., 45., 40. }
-  return $heur[$maxdop-1]
+  return $heur[$maxdop - 1]
 }
+
+# returns pct progress for nonresumable operations
+function PCTheuristic([string]$itype, [string]$cmd, [float]$logreads, [float]$writes, [int]$pages, [int]$frags, [float]$density) {
+  if ($cmd.contains(" REORGANIZE")) {
+    if ($itype -eq "CLUSTERED") {
+      $val = ($writes - $logreads / 2000) / ($pages + 0.5 * $frags) * (800 + $density) / 900 / 1.7 * 100.0
+      return $val + $global:reorg_pct_adder
+    }
+    $val = $writes / ($pages + 0.5 * $frags) / (130.0 + $density) * 230 / 2.18 * 100.0  # nonclustered
+    return $val + $global:reorg_pct_adder
+  }
+  if ($cmd.contains("COMPRESSION=PAGE")) {
+    if ($itype -eq "CLUSTERED") {
+      return ($logreads - $writes * 2) / ($pages + 0.2 * $frags) / (150.0 + $density) * 250 / 1.14 * 100.0 
+    }
+    return $logreads / $pages / (50.0 + $density) * 50.0 / 2.9 * 100.0 # nonclustered
+  }
+  # no compression
+  if ($itype -eq "CLUSTERED") {
+    return $logreads / $pages / (50.0 + $density) * 150 / 3.0 * 100.0 
+  }
+  return $logreads / ($pages + 0.1 * $frags) / (50.0 + $density) * 150.0 / 2.74 * 100.0 # nonclustered
+}
+
 
 function ADEFRAG([string] $connstrX, [string]$sqlX, [string]$alter, `
     [string] $db, [string]$schema, [string]$table, [string]$index, [int]$par) {
@@ -204,10 +228,11 @@ function ADEFRAG([string] $connstrX, [string]$sqlX, [string]$alter, `
   select @b=max(blocked) from master.dbo.sysprocesses where spid=@n and blocked>0 and blocked<>@n
   select @blk=max(spid) from master.dbo.sysprocesses where blocked=@n and blocked<>spid and spid<>@n
   select isnull(@n,0) as defrag, isnull(@io,0) as io, isnull(@blk,0) as blk, isnull(@b,0) as wfor,
-    -- (select percent_complete from sys.dm_exec_requests where session_id=@n) as pct -- sometimes doesnt work
     (select max(percent_complete) from [$db].sys.index_resumable_operations) as pct,
-    (select isnull(sum(logical_reads),0) from sys.dm_exec_requests where session_id=@n) as logreads,
+    isnull(logical_reads,0) as logreads,
+    isnull(writes,0) as writes,
     @spidcnt as spidcnt
+    from sys.dm_exec_requests where session_id=@n
 "@
 
   $who = @"
@@ -274,6 +299,7 @@ select distinct P.spid,
     else {
       $r = MSSQLscalar $connstrX $waitq
       $logreads = $r.logreads
+      $writes = $r.writes
       $spidnct = $r.spidcnt
     }
     $defragspid = $r.defrag
@@ -294,6 +320,9 @@ select distinct P.spid,
         if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME")) {
           Write-host -ForegroundCOlor Yellow "  S - STOP   - exits script, but leaves index in rebuild state"
         }
+        if ($cmd.contains( "REORGANIZE")) {
+          Write-host -ForegroundCOlor Yellow "  R - for REORGANIZE, stops processing and recalulate new stats"
+        }
         Write-host -ForegroundCOlor Yellow "  F - FINISH - finishes current index rebuild and then stops"
         Write-host -ForegroundCOlor Yellow "  K - SKIP   - aborts (skips) this index but continues with the rest of the work"
         Write-host -ForegroundCOlor Yellow "  C - CONTINUE"
@@ -301,6 +330,11 @@ select distinct P.spid,
         [console]::TreatControlCAsInput = $true
         $Host.UI.RawUI.FlushInputBuffer()
         if ($ky -eq "F") { $global:finishflag = 1 }
+        elseif ($ky -eq "R") { 
+          fKILL $connstrX $db $True 
+          $global:finishflag = 3 
+          break
+        }
         elseif ($ky -eq "K") { 
           fKILL $connstrX $db $True 
           $global:finishflag = 2 
@@ -324,9 +358,10 @@ select distinct P.spid,
       $newblocked = 0
       $pnr = 101. # pnr - point of no return
       try {
-        if ( -not ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME"))) {
-          $pct = 100 * $logreads / 2.0 / ($pages + 3000)
-          if ($pct -gt 100) { $pct = 99.9 }
+        if ( -not ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME") -or $cmd.contains(" REORGANIZE"))) {
+          $pct = PCTheuristic $itype $cmd $logreads $writes $pages $frags $density
+          # $pct = 100 * $logreads / 2.0 / ($pages + 3000)
+          # if ($pct -gt 100) { $pct = 99.9 }
           if ($pct -lt 0) { $pct = 0.0 }
           $pnr = PNRheuristic $spidnct $itype
         } 
@@ -388,8 +423,8 @@ select distinct P.spid,
       if (($io - $oldio) -gt 400) { $stuckcnt = 0 }
       elseif ( $beinglocked -eq 0 ) { $stuckcnt = $stuckcnt + 1 }
       Write-Host "  $msg"
-      if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME")) {
-        Write-Host "  pausing REBUILD..."
+      if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME") -or $cmd.contains(" REORGANIZE")) {
+        Write-Host "  pausing REBUILD/REORG..."
         LOG $db $schema $table $index $par "PAUSE-KILL" $msg
         fKILL $connstrX $db $False
         break
@@ -421,13 +456,13 @@ select distinct P.spid,
         $maxspidcnt = $spidcnt 
         LOG $db $schema $table $index $par "MAXDOP" "$maxspidcnt"
       }      
-      if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME")) {
+      if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME") -or $cmd.contains(" REORGANIZE")) {
         if ((($maxlogused -gt 0) -and ($logused -gt $maxlogused)) `
             -or (($maxlogusedpct -gt 0) -and ($logpct -gt $maxlogusedpct)) `
             -or ($qlen -gt $maxqlen) `
             -or ($cpupct -gt $maxcpu) `
             -or ($other -eq 2)) {
-          if ($origcmd.contains("RESUMABLE=ON")) {
+          if ($origcmd.contains("RESUMABLE=ON") -or $cmd.contains(" REORGANIZE")) {
             Write-Host -ForegroundColor Yellow "  starting to throttle because of LDF size or Queue size"
             LOG $db $schema $table $index $par "PAUSE-KILL" "throttling"
             fKILL $connstrX $db $False
@@ -482,19 +517,31 @@ select distinct P.spid,
       }
       else {
         # no pct, OFFLINE REBUILD
-        $pct = 100 * $logreads / 2.0 / ($pages + 3000)
-        if ($pct -gt 100) { $pct = 99.9 }
-        if ($pct -lt 0) { $pct = 0.0 }
         $elapsed = (get-date) - $started
-        try { $left = ($elapsed.TotalSeconds / $pct) * (100 - $pct) } 
+        $pct = PCTheuristic $itype $cmd $logreads $writes $pages $frags $density
+        #$pct = 100 * $logreads / 2.0 / ($pages + 3000)
+        #if ($pct -gt 100) { $pct = 99.9 }
+        if ($pct -lt 0) { $pct = 0.0 }
+        if ($cmd.contains(" REORGANIZE")) {
+          if ($pct -gt 120.0) {
+            Write-host -ForegroundColor Red "During INDEX REORGANIZE, when pct is above 120.0, it could be a symptom of a 'collision'"
+            Write-host -ForegroundColor Red "This is when it tries to reorganize a 'hotspot', where new data is constantly being inserted"
+            Write-host -ForegroundColor Red "To avoid being stuck in a near-infinite loop, script stops processing at this point"
+            fKILL $connstrX $db $True 
+            $global:finishflag = 3 
+            break
+          }
+        }
+        try { $left = (($elapsed.TotalSeconds + $global:reorg_elapsed_adder) / $pct) * (100 - $pct) } 
         catch { $left = 10 }
-        if ($left -gt 24 * 3600) { $left = 24 * 3600 }
+        if ($left -gt 100 * 24 * 3600) { $left = 24 * 3600 * 100 }
         $eta = (Get-Date).AddSeconds($left).ToString("yyyy-MM-dd HH:mm:ss")
         $pctformatted = $pct.tostring('###.##', [Globalization.CultureInfo]::CreateSpecificCulture('en-US'))
         Write-Host "  ETA: $eta   pct completed: $pctformatted% (rough estimation)" 
       }
     }
     $oldio = $io
+    $global:global_pct = $pct
   }
   Wait-Job -Job $j | Out-null
   $res = [string](Receive-Job -Job $j)
@@ -519,6 +566,10 @@ select distinct P.spid,
   elseif ($res.Contains("elapsed time exceeded") -or ($chunkreason -eq 1)) {
     $res = "Stopped because exceeded MAX_DURATION"
     $status = 3
+  }
+  elseif ($global:finishflag -eq 3) {
+    $res = ""
+    $status = 0
   }
   elseif ($global:finishflag -eq 2) {
     $res = "Index force skipped"
@@ -567,6 +618,8 @@ select distinct P.spid,
   }
   Remove-Job -Job $j | Out-Null
   $global:gresult = $status
+  $global:reorg_pct_adder = $global:global_pct
+  $global:reorg_elapsed_adder = $elapsed.TotalSeconds + $global:reorg_elapsed_adder 
   return $status
 }
 
@@ -580,7 +633,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.2, check https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.26, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
@@ -593,11 +646,13 @@ $allowNonOnline = 10 # Gb. if ONLINE is not possible, do it without ONLINE optio
 $threshold = 40 # skip tables with low level of fragmentation
 # must be blank or start with <space>and ...
 $extrafilter = " and SchemaName not in ('tmp','import')"
+$reorganize = 0 # 1 use use REORANIZE instead of REBUILD
 
 # options
 $deadline = "" # HH:mm when already passed today, tomorrow is assumed. "" for no deadline
-$rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=4" # Additional options, for example, MAXDOP, but NOT MAX_DURATION and not SORT_IN_TEMPDB
+$rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=2" # Additional options, for example, MAXDOP, but NOT MAX_DURATION and not SORT_IN_TEMPDB
 $columnstoreopt = "MAXDOP=1" # for column store
+$reorganizeopt = "" # for index reorganize
 $relaxation = 50 # period we wait before attempts, giving time for other processes to complete
 $chunkminutes = 1000000 # max period of continuous work, this is an artificial MAX_DURATION. use it, not SQL server setting
 $maxcpu = 80 # max cpu pct to throttle
@@ -644,19 +699,19 @@ if ($fragspid -gt 0) {
 
 $r = MSSQLscalar $connstr "select count(*) as cnt from sysobjects where name like 'FRG_%'"
 if ($r.cnt -eq 0) {
-  Write-Host -ForegroundColor Red "Please apply FRG_install.sql to your $Tuning database"
+  Write-Host -ForegroundColor Red "Please apply FRG_install.sql to your database [$Tuning]"
   exit
 }
 
 $r = MSSQLscalar $connstr "select count(*) as cnt from FRG_SizeStats"
 if ($r.cnt -eq 0) {
-  Write-Host -ForegroundColor Red "Please run FRG_FillSizeStats in $Tuning database to collect index size statistics"
+  Write-Host -ForegroundColor Red "Please run FRG_FillSizeStats in database [$Tuning] to collect index size statistics"
   exit
 }
 
 $r = MSSQLscalar $connstr "select count(*) as cnt from FRG_Levels"
 if ($r.cnt -eq 0) {
-  Write-Host -ForegroundColor Red "Please run FRG_FillFragmentation in $Tuning database to collect index fragmentation statistics"
+  Write-Host -ForegroundColor Red "Please run FRG_FillFragmentation in database [$Tuning] to collect index fragmentation statistics"
   exit
 }
 
@@ -697,7 +752,7 @@ $session_started = get-Date
 [console]::TreatControlCAsInput = $true
 $Host.UI.RawUI.FlushInputBuffer()
 $global:finishflag = 0
-$q = "select DbName,SchemaName,TableName,IndexName,partition,TotalSpaceMb,page_count,frag_count,IndexType,frag_pct,NumPartitions from FRG_last $where order by TotalSpaceMb" 
+$q = "select DbName,SchemaName,TableName,IndexName,partition,TotalSpaceMb,page_count,frag_count,IndexType,frag_pct,NumPartitions,density from FRG_last $where order by TotalSpaceMb" 
 $req = MSSQLscalar $connstr $q
 foreach ($r in $req) {
   if ($global:finishflag -eq 1) {
@@ -717,11 +772,14 @@ foreach ($r in $req) {
   $siz = $r.TotalSpaceMb
   $pages = $r.page_count
   $frags = $r.frag_count
+  $density = $r.density
   $fragpct = $r.frag_pct
   $itype = $r.IndexType
   $totalpct = 100. * $workdone / $worksize
   Write-Host ""
   Write-Host "Next Index size is $siz Mb ..."
+  $global:reorg_pct_adder = 0.00
+  $global:reorg_elapsed_adder = 0
 
   if (($workdone -gt $maxdailysize) -and ($maxdailysize -gt 0)) {
     Write-Host "Terminated, processed size so far: $workdone, daily limit: $maxdailysize"
@@ -778,8 +836,16 @@ foreach ($r in $req) {
 
   # $result: 0 OK, 1 KILLED, 2 PAUSED 3 MAXDURATION 4 CANT REBUILD RESUMABLE 5 CANT REBUILD ONLINE
   # strange, but -1 is also OK
+  #$dbg = "insert into [$tuning].dbo.FRG_DBG select '$db','$schema','$tab','$ind',$par,$pages,$frags,reads,writes,logical_reads from sys.dm_exec_requests where session_id=@@spid"
   $retrycnt = 0
-  if (($itype -eq "CLUSTERED COLUMNSTORE") -and ($ent -eq 0)) {
+  if ($reorganize -gt 0) {
+    $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] REORGANIZE "
+    if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
+    if ($reorganizeopt -gt "") { $cmd = $cmd + " WITH (" + $reorganizeopt + ")" }
+    $op = "REORG"
+    $pausing = ""
+  }
+  elseif (($itype -eq "CLUSTERED COLUMNSTORE") -and ($ent -eq 0)) {
     $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] REBUILD "
     if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
     if ($columnstoreopt -gt "") { $cmd = $cmd + " WITH (" + $columnstoreopt + ")" }
@@ -801,6 +867,7 @@ foreach ($r in $req) {
     if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
     if (($rebuildopt -gt "") -and ($siz -lt $sortintempdb)) { $cmd = $cmd + " WITH (" + $rebuildopt + ",SORT_IN_TEMPDB=ON)" }
     elseif ($rebuildopt -gt "") { $cmd = $cmd + " WITH (" + $rebuildopt + ")" }
+    #$cmd = $cmd + " ; $dbg"
     $op = "REBUILD"    
     $pausing = ""
   }
@@ -809,6 +876,7 @@ foreach ($r in $req) {
     if ($numpartitions -gt 1) { $cmd = $cmd + " PARTITION=$par " }
     if (($rebuildopt -gt "") -and ($siz -lt $sortintempdb)) { $cmd = $cmd + " WITH (" + $rebuildopt + ",SORT_IN_TEMPDB=ON)" }
     elseif ($rebuildopt -gt "") { $cmd = $cmd + " WITH (" + $rebuildopt + ")" }
+    #$cmd = $cmd + " ; $dbg"
     $op = "REBUILD"
     $pausing = ""
   }
@@ -831,7 +899,6 @@ foreach ($r in $req) {
     if ($rebuildopt -gt "") { $cmd = $cmd + "," + $rebuildopt }
     $cmd = $cmd + ")"
   }
-
 
   $origcmd = $cmd
   while ($True) {
@@ -858,7 +925,7 @@ foreach ($r in $req) {
       Write-Host -ForegroundColor Yellow "  wait $relaxation seconds between retries"
       LOG $db $schema $tab $ind $par "WAIT" ""
       Start-Sleep -Seconds $relaxation
-      if (-not (($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME"))) -and ($retrycnt -gt $offlineretries)) { 
+      if (-not (($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME") -or $cmd.contains(" REORGANIZE"))) -and ($retrycnt -gt $offlineretries)) { 
         Write-host -ForegroundColor Red "Giving up after $retrycnt retries"
         break 
       }
@@ -870,7 +937,7 @@ foreach ($r in $req) {
       Write-Host "  wait $relaxation seconds between retries"
       LOG $db $schema $tab $ind $par "WAIT" ""
       Start-Sleep -Seconds $relaxation
-      $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] RESUME"
+      if (-not $cmd.contains(" REORGANIZE")) { $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] RESUME" }
       continue
     }
     if ($result -eq 6) {
@@ -883,9 +950,14 @@ foreach ($r in $req) {
         $logused, $logpct, $qlen, $other, $cpupct, $spidcnt = THROTTLER $db
         if ($other -eq 3) {
           # panic
-          $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] ABORT"
-          write-Host -ForegroundColor Yellow $cmd
-          $status = MSSQLexec $connstr $cmd
+          if (-not $cmd.contains(" REORGANIZE")) {
+            $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] ABORT"
+            write-Host -ForegroundColor Yellow $cmd
+            $status = MSSQLexec $connstr $cmd
+          }
+          else { 
+            fKILL $connstr $db $True             
+          }
           LOG "" "" "" "" 0 "PANIC" ""
           exit
         }
@@ -899,22 +971,27 @@ foreach ($r in $req) {
         }
         else { $throttled = 0 }
       }
-      $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] RESUME"
+      if (-not $cmd.contains(" REORGANIZE")) { $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] RESUME" }
       continue
     }
     if ($result -eq 3) {
       if ($deadline -gt "") {
         if ((get-date) -gt $dl) {
           Write-host -ForeroundColor Red "  Deadline reached, stopping and aborting index rebuild"
-          $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] ABORT"
-          write-Host -ForegroundColor Yellow $cmd
-          $status = MSSQLexec $connstr $cmd
+          if (-not $cmd.contains(" REORGANIZE")) {
+            $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] ABORT"
+            write-Host -ForegroundColor Yellow $cmd
+            $status = MSSQLexec $connstr $cmd
+          }
+          else {
+            fKILL $connstr $db $True 
+          }
           LOG "" "" "" "" 0 "DEADLINE" $deadline
           exit
         }
       }
       Write-host -ForegroundColor Yellow "  Resuming index rebuild"
-      $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] RESUME"
+      if (-not $cmd.contains(" REORGANIZE")) { $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] RESUME" }
       continue
     }
     if ($result -eq 7) { break } # index force skip
