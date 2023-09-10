@@ -5,6 +5,7 @@ function VictimClassifier([string] $conn, [int] $spid) {
   #  cat - category this connection falls into
   #  waittime - time this connection already waited, sec
   #  maxwaitsec - maximum time for this connection allowed to wait
+  if (Test-Path -Path "panic.txt" -PathType Leaf) { return 3 }
 
   # $waitdescr, $waitcategory, $waited, $waitlimit 
   $q = @"
@@ -19,14 +20,16 @@ function VictimClassifier([string] $conn, [int] $spid) {
     select substring(program_name,charindex(' 0x',program_name)+3,100) as p
       from sysprocesses where program_name like 'SQLAgent - TSQL JobStep%' and spid=$spid) Q) A
     on A.j=J.job_id
-  select @cmd=Event_Info from sys.dm_exec_input_buffer($spid, NULL)
+  select @cmd=isnull(Event_Info,'') from sys.dm_exec_input_buffer($spid, NULL)
   select @chain=count(*) from sysprocesses where blocked=$spid and blocked<>spid
-  select distinct @cmd as cmd,isnull(@job,'') as job, @chain as chain, waittime/1000 as waittime,open_tran,rtrim(program_name) as program_name 
+  select distinct @cmd as cmd,isnull(@job,'') as job, @chain as chain, waittime/1000 as waittime,open_tran,
+    rtrim(program_name) as program_name, rtrim(isnull(cmd,'')) as cmdtype
     from sysprocesses P where P.spid=$spid
 "@  
   $vinfo = MSSQLscalar $conn $q
   $prg = $vinfo.program_name
   $cmd = $vinfo.cmd # top level command from INPUTBUFFER
+  $cmdtype = $vinfo.cmdtype # from sysprocesses
   $job = $vinfo.job # job name if it is a job, otherwise ""
   $chain = $vinfo.chain # >0 if a process, locked by Rebuild, also locks other processes (chain locks)
   $waittime = $vinfo.waittime # already waited
@@ -35,6 +38,7 @@ function VictimClassifier([string] $conn, [int] $spid) {
   $cat = "INTERACTIVE"
   if ($cmd -like '*UPDATE*STATISTICS*') { $cat = "STATS" }
   elseif ($job -like "*ImportantJob*") { $cat = "CRITJOB" }
+  elseif ($cmdtype -like "*TASK MANAGER*") { $cat = "TASK" } # likely change tracking
   elseif ($job -gt "") { 
     $cat = "JOB" 
     $cmd = "Job $job"
@@ -65,6 +69,9 @@ function VictimClassifier([string] $conn, [int] $spid) {
     "L-CRITJOB"     = 20
     "L-STUDIO"      = 20
     "L-SQLCMD"      = 20
+    "TASK"          = 900
+    "L-TASK"        = 60
+    "T-TASK"        = 600
   } 
   return $cmd, $cat, $waittime, $maxwaitsecs[$cat]
 }

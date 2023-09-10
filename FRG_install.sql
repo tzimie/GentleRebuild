@@ -1,6 +1,6 @@
 USE [Tuning]
 GO
- 
+
 SET ANSI_NULLS ON
 GO
 
@@ -161,7 +161,6 @@ select getdate(),database_id,object_id,index_id,partition,''DETAILED'',
     END 
   CLOSE ti
   DEALLOCATE ti
-  select * from sys.dm_db_index_physical_stats(12,33,1,1,'detailed')
 GO
 
 CREATE procedure [dbo].[FRG_FillFragmentationOne]

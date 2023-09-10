@@ -1,4 +1,4 @@
-param ([string] $settingfile) 
+param ([string] $settingfile)
 
 function MSSQLquery([string] $connstr, [string]$sql) {
   $sqlConn = New-Object System.Data.SqlClient.SqlConnection
@@ -11,13 +11,13 @@ function MSSQLquery([string] $connstr, [string]$sql) {
   $adp = New-Object System.Data.SqlClient.SqlDataAdapter $sqlcmd
   $data = New-Object System.Data.DataSet
   $adp.Fill($data) | Out-Null
+  $_.Exception.Message | Out-File "$settingfile.log" -Append  
   $d = $data.Tables[0]
   $sqlConn.Close()
   return $d 
 }
 
 function MSSQLscalar([string] $connstr, [string]$sql) {
-
   $sqlConn = New-Object System.Data.SqlClient.SqlConnection
   $sqlConn.ConnectionString = $connstr
   $sqlConn.Open()
@@ -29,6 +29,7 @@ function MSSQLscalar([string] $connstr, [string]$sql) {
   $adp = New-Object System.Data.SqlClient.SqlDataAdapter $sqlcmd
   $data = New-Object System.Data.DataSet
   $adp.Fill($data) | Out-Null
+  $_.Exception.Message | Out-File "$settingfile.log" -Append  
   $firstrow = $data.Tables[0][0]
   $sqlConn.Close()
   return $firstrow
@@ -43,6 +44,7 @@ function MSSQLexec([string] $connstr, [string]$sql) {
   $sqlcmd.CommandText = $sql
   $sqlcmd.CommandTimeout = 1000000
   $ret = $sqlcmd.ExecuteNonQuery()
+  $_.Exception.Message | Out-File "$settingfile.log" -Append  
   $sqlConn.Close()
   return $ret
 }
@@ -56,6 +58,7 @@ function MSSQLexecQuick([string] $connstr, [string]$sql) {
   $sqlcmd.CommandText = $sql
   $sqlcmd.CommandTimeout = 15
   $ret = $sqlcmd.ExecuteNonQuery()
+  $_.Exception.Message | Out-File "$settingfile.log" -Append  
   $sqlConn.Close()
   return $ret
 }
@@ -106,13 +109,13 @@ function THROTTLER([string] $db) {
     (select isnull(sum(log_send_queue_size)+sum(redo_queue_size),0)
       from sys.dm_hadr_database_replica_states 
       where database_id=DB_ID('$db')) as qlen,
-    (select isnull(max(case when redo_queue_size>0 then datediff(ss,last_hardened_time, getdate()) else 0 end),0)
+    (select isnull(max(case when redo_queue_size>0 then datediff(ss,last_commit_time, getdate()) else 0 end),0)
       from sys.dm_hadr_database_replica_states 
       where database_id=DB_ID('$db')) as delays,
     @cpupct as cpupct
     FROM sys.database_files WHERE type=1  
 "@  
-  $logsize = MSSQLscalar $connstr $q
+  $logsize = MSSQLscalar $connstrREAL $q
   $qlen = [int] ($logsize.qlen / 1024)
   $logtotal = $logsize.CurrentSizeMB
   $spidcnt = $logsize.spidcnt
@@ -126,14 +129,14 @@ function THROTTLER([string] $db) {
 
   Write-Host "Database $db LDF: Total $logtotal Mb, Free $logfree Mb, Used $logused Mb - $($logpctformatted)%"
   Write-Host "  CPU $cpupct%, AlwaysOn Queue $qlen Mb, Replica delay $delay sec, actual rebuild spids: $spidcnt"
-  $other = CustomThrottling $connstr 
+  $other = CustomThrottling $connstrREAL 
   if ($other -eq 3) {
     Write-host -ForegroundColor Red "  PANIC from Custom throttling! Exit!"
   }
   return $logused, $logpct, $qlen, $other, $cpupct, $spidnct
 }
 
-function fKILL([string] $connstr, [string] $db, [bool]$abortflag) {
+function fKILL([string] $connstr, [string] $db, [int]$abortflag) {
   $r = MSSQLscalar $connstr "select isnull((select max(spid) from master.dbo.sysprocesses where program_name like 'Defrag%'),0) as spid"
   $conn = $r.spid
   $qq = @"
@@ -143,6 +146,18 @@ select
   (select count(*) from sys.index_resumable_operations where state=0) as running,
   (select count(*) from sys.index_resumable_operations where state=1) as paused
 "@
+  if ($abortflag -eq -1) {
+    $r = MSSQLscalar $connstr $qq
+    $spidcnt = $r.cnt
+    $running = $r.running
+    $paused = $r.paused
+    Write-Host "  spidcnt=$spidcnt, running=$running, paused=$paused"
+    if (($running -gt 0) -and ($paused -gt 0)) {
+      Write-host -ForegroundColor Red "Panic - something went wrong! Check sys.index_resumable_operations"
+      exit
+    }
+    return    
+  }
   Write-Host -ForegroundColor Yellow "kill $conn"
   if ($conn -gt 0) { MSSQLexec $connstr "kill $conn" }
   while ($True) {
@@ -155,7 +170,7 @@ select
     if (($spidcnt -eq 0) -and ($running -eq 0)) { break }
   }
   # if abortflag ABORT resumable index operation
-  if ($abortflag -and ($paused -gt 0)) {
+  if (($abortflag -eq 1) -and ($paused -gt 0)) {
     $r = MSSQLscalar $connstr "use [$db]; select sql_text from sys.index_resumable_operations"
     $sql = $r.sql_text
     $sql = ($sql -split " REBUILD ")[0] + " ABORT"
@@ -331,21 +346,21 @@ select distinct P.spid,
         $Host.UI.RawUI.FlushInputBuffer()
         if ($ky -eq "F") { $global:finishflag = 1 }
         elseif ($ky -eq "R") { 
-          fKILL $connstrX $db $True 
+          fKILL $connstrX $db 1
           $global:finishflag = 3 
           break
         }
         elseif ($ky -eq "K") { 
-          fKILL $connstrX $db $True 
+          fKILL $connstrX $db 1
           $global:finishflag = 2 
           break
         }
         elseif ($ky -eq "S") { 
-          fKILL $connstrX $db $False 
+          fKILL $connstrX $db 0
           exit
         }
         elseif ($ky -eq "A") { 
-          fKILL $connstrX $db $True 
+          fKILL $connstrX $db 1 
           exit
         }
       }
@@ -367,9 +382,11 @@ select distinct P.spid,
         } 
         $elapsed = (get-date) - $started
         [int]$left = ($elapsed.TotalSeconds / ($pct - $firstpctknown)) * (100 - $pct)
+        if ($left -lt 0) { $left = 0 }
       }
       catch { $left = 0 }
       if ($pct -lt 0.1) { $left = 0 }
+      if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME") -or $cmd.contains(" REORGANIZE")) { $left = 0 }
 
       Write-Host -ForegroundColor Red "  the following processes are blocked and waiting: "
       $vics = MSSQLscalar $connstrX $who
@@ -404,7 +421,7 @@ select distinct P.spid,
         Write-Host "  stopping current chunk ($chunkminutes minutes)..."
         $chunkreason = 1
         LOG $db $schema $table $index $par "PAUSE-KILL-CHUNK" $msg
-        fKILL $connstrX $db $False
+        fKILL $connstrX $db 0
         break
       }
     }
@@ -426,7 +443,7 @@ select distinct P.spid,
       if ($cmd.contains("RESUMABLE=ON") -or $cmd.contains(" RESUME") -or $cmd.contains(" REORGANIZE")) {
         Write-Host "  pausing REBUILD/REORG..."
         LOG $db $schema $table $index $par "PAUSE-KILL" $msg
-        fKILL $connstrX $db $False
+        fKILL $connstrX $db 0
         break
       }
       elseif ($pct -gt $pnr) {
@@ -435,7 +452,7 @@ select distinct P.spid,
       elseif ($killnonresumable -eq 1) {
         Write-host -ForegroundColor Yellow "  As KillNonResumable=1, connection will be killed and work will be lost"
         LOG $db $schema $table $index $par "KILL" $msg
-        fKILL $connstrX $db $True
+        fKILL $connstrX $db 1
         break
       }
       else {
@@ -449,7 +466,7 @@ select distinct P.spid,
       if ($other -eq 3) {
         # panic
         LOG $db $schema $table $index $par "PAUSE-KILL" "PANIC"
-        fKILL $connstrX $db $true
+        fKILL $connstrX $db 1
         exit
       }
       if ($spidcnt -gt $maxspidcnt) { 
@@ -465,7 +482,7 @@ select distinct P.spid,
           if ($origcmd.contains("RESUMABLE=ON") -or $cmd.contains(" REORGANIZE")) {
             Write-Host -ForegroundColor Yellow "  starting to throttle because of LDF size or Queue size"
             LOG $db $schema $table $index $par "PAUSE-KILL" "throttling"
-            fKILL $connstrX $db $False
+            fKILL $connstrX $db 0
             $throttle = 1
             break
           }
@@ -509,7 +526,7 @@ select distinct P.spid,
             if ($etaval -gt $dl) {
               Write-Host -ForegroundColor yellow "Current index won't complete in time before the deadline ($deadline)"
               Write-Host -ForegroundColor yellow "Defrag Aborted. (this condition is verified when pct is between 3% and 4%)"
-              fKILL $connstrX $db $True 
+              fKILL $connstrX $db 1
               exit
             }
           }
@@ -527,13 +544,14 @@ select distinct P.spid,
             Write-host -ForegroundColor Red "During INDEX REORGANIZE, when pct is above 120.0, it could be a symptom of a 'collision'"
             Write-host -ForegroundColor Red "This is when it tries to reorganize a 'hotspot', where new data is constantly being inserted"
             Write-host -ForegroundColor Red "To avoid being stuck in a near-infinite loop, script stops processing at this point"
-            fKILL $connstrX $db $True 
+            fKILL $connstrX $db 1
             $global:finishflag = 3 
             break
           }
         }
         try { $left = (($elapsed.TotalSeconds + $global:reorg_elapsed_adder) / $pct) * (100 - $pct) } 
         catch { $left = 10 }
+        if ("$left" -eq "NaN") { $left = 1 }
         if ($left -gt 100 * 24 * 3600) { $left = 24 * 3600 * 100 }
         $eta = (Get-Date).AddSeconds($left).ToString("yyyy-MM-dd HH:mm:ss")
         $pctformatted = $pct.tostring('###.##', [Globalization.CultureInfo]::CreateSpecificCulture('en-US'))
@@ -600,6 +618,21 @@ select distinct P.spid,
     $status = 0
     LOG $db $schema $table $index $par "COMPLETED" ""
     Write-Host "Success!!! ($siz Mb) Recalculating stats..."
+    if ($server -ne $replicaserver) {
+      $secsync = 0
+      $lsn = (MSSQLquery $connstrREAL "select last_hardened_lsn from sys.dm_hadr_database_replica_states where is_local=1 and database_id=db_id('$db')")[0]
+      Write-Host "  Target  LSN: $lsn"
+      while ($True) {
+        $currlsn = (MSSQLquery $connstr "select last_commit_lsn from sys.dm_hadr_database_replica_states where is_local=1 and database_id=db_id('$db')")[0]
+        Write-Host "  Current LSN: $currlsn   wait for LSN: $lsn"
+        if ($currlsn -ge $lsn) { 
+          Write-Host "  Synchronized after $secsync seconds"
+          break 
+        }
+        Start-Sleep -Seconds 1
+        $secsync += 1
+      }
+    }
     $sql = "exec $Tuning.dbo.FRG_FillFragmentationOne '$db','$schema','$table','$index',$par"
     try {
       $delta = MSSQLquery $connstr $sql
@@ -633,12 +666,13 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.26, github https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.30, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
 $server = "servername"
 $dbname = "db1,db2" # * means all, comma-separated list is also accepted
+$replicaserver = ""
 
 # what to defragment
 $allowNonResumable = 50 # Gb. if Resumable is not possible, do it without Resumable option. If table is begger, then skip
@@ -673,6 +707,8 @@ if ($settingfile -gt "") {
   $Tuning = $Workdb
 }
 
+if ($replicaserver -eq '') { $replicaserver = $server }
+
 if ($Tuning -eq "TOCHANGE") {
   Write-Host -ForegroundColor Red "It is unlikely that you DBA database is called 'TOCHANGE'. Please set workdb to DBA database where FRG script is installed"
   exit
@@ -689,8 +725,9 @@ if ($deadline -gt "") {
   Write-Host "Deadline: $dl" 
 }
 
-$connstr = "Server=$server;Database=$Tuning;Trusted_Connection=True;" # to DBA database
-$r = MSSQLscalar $connstr "select isnull((select max(spid) from master.dbo.sysprocesses where program_name like 'Defrag%'),0) as spid"
+$connstr = "Server=$replicaserver;Database=$Tuning;Trusted_Connection=True;" # to DBA database, may be on RO replica
+$connstrREAL = "Server=$server;Database=$Tuning;Trusted_Connection=True;" # to primary server
+$r = MSSQLscalar $connstrREAL "select isnull((select max(spid) from master.dbo.sysprocesses where program_name like 'Defrag%'),0) as spid"
 $fragspid = $r.spid
 if ($fragspid -gt 0) {
   Write-Host -ForegroundColor Red "Defrag spid $fragspid is already running (label Defrag)"
@@ -743,6 +780,7 @@ if ($row.cnt -eq 0) {
   exit
 }
 Write-Host "Total $($row.cnt) indexes with $([int]($row.rows/1000000))M rows, total size $([int]($row.TotalSpaceMb/1024))Gb"
+
 LOG "" "" "" "" 0 "INIT" $where
 $worksize = $row.TotalSpaceMb
 $workdone = 0
@@ -763,6 +801,17 @@ foreach ($r in $req) {
     Write-host "last index aborted and skipped, continue"
     $global:finishflag = 0
   }
+  # sanity check, at this moment no indexes should be in running resumable state
+  $runaway = MSSQLscalar $connstrREAL @"
+    create table #res (n int, db sysname)
+    exec sp_MSforeachdb N'insert into #res select count(*),''?'' from [?].sys.index_resumable_operations where state=0'
+    select sum(n) as cnt, max(case when n=0 then '' else db end) as db from #res
+"@
+  if ($runaway.cnt -gt 0) {
+    Write-Host -ForegroundColor Red "Check sys.index_resumable_operations - index rebuild is running (db $($runaway.db))! Runaway? Leaked from this script?"
+    exit 
+  }
+
   $db = $r.DbName
   $schema = $r.SchemaName
   $tab = $r.TableName
@@ -907,7 +956,7 @@ foreach ($r in $req) {
 
     # this is a typical pwsh problem, value leak. Result should be in $result, but it is poisoned with -1 from somewhere. Use global var
     $global:gresult = -99
-    $result = ADEFRAG $connstr $cmd $pausing    $db $schema $tab $ind $par
+    $result = ADEFRAG $connstrREAL $cmd $pausing    $db $schema $tab $ind $par
     $result = $global:gresult
     if ($result -eq 0) {
       $workdone = $workdone + $siz 
@@ -953,10 +1002,10 @@ foreach ($r in $req) {
           if (-not $cmd.contains(" REORGANIZE")) {
             $cmd = "USE [$db]; ALTER INDEX [$ind] on [$schema].[$tab] ABORT"
             write-Host -ForegroundColor Yellow $cmd
-            $status = MSSQLexec $connstr $cmd
+            $status = MSSQLexec $connstrREAL $cmd
           }
           else { 
-            fKILL $connstr $db $True             
+            fKILL $connstr $db 1             
           }
           LOG "" "" "" "" 0 "PANIC" ""
           exit
@@ -967,6 +1016,7 @@ foreach ($r in $req) {
             -or ($cpupct -gt $maxcpu) `
             -or ($qlen -gt $maxqlen / 2)) {
           Write-Host "  still waiting..."
+          fKill $connstr $db -1 # DBG
           Start-Sleep -Seconds $relaxation
         }
         else { $throttled = 0 }
@@ -984,7 +1034,7 @@ foreach ($r in $req) {
             $status = MSSQLexec $connstr $cmd
           }
           else {
-            fKILL $connstr $db $True 
+            fKILL $connstr $db 1 
           }
           LOG "" "" "" "" 0 "DEADLINE" $deadline
           exit

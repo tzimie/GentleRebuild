@@ -2,6 +2,7 @@
 
 # where to rebuild, MUST CHANGE!!!
 $server = "your server" # must change
+$replicaserver = $server # used for 2 server mode, with read-only replica
 $dbname = "db1,db2" # * means all 9except system databases and ReportServer*), comma-separated list is also accepted
 $workdb = "TOCHANGE" # chaneg to your DBA database, where FRG_ objects are installed
 
