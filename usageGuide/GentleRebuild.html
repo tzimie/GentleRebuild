@@ -1,4 +1,4 @@
-<!DOCTYPE html
+<!DOCTYPE html>
 <html>
   <head>
     <meta http-equiv="content-type" content="text/html; charset=UTF-8">
@@ -8,10 +8,10 @@
     <p><b>GentleRebuild</b> is Powershell script for online index rebuild in
       high-load clustered MSSQL databases working 24/7 - <b>Enterprise Edition
       </b>is preferred, <b>Standard Edition</b> is supported with limitations.
-      Script executes <strong>ALTER INDEX ... REBUILD</strong> in a safe
-      controlled mode using 2 threads: one thread is executing the command while
-      second one is checking the environment for several conditions. What is
-      controlled:</p>
+      Script executes <strong>ALTER INDEX ... REBUILD/REORGANIZE</strong> in a
+      safe controlled mode using 2 threads: one thread is executing the command
+      while second one is checking the environment for several conditions. What
+      is controlled:</p>
     <ul>
       <li>High CPU</li>
       <li>Too active index rebuild activity can overflow the <b>LDF</b> file -
@@ -34,6 +34,9 @@
       <li>Limits the maximum size of indexes rebuild during a single run - in
         case the amount of total space for transaction log backups is limited or
         logs are used to roll over to STANDBY databases.</li>
+      <li>Custom throttling conditions - review <b>custom.ps1</b> and adjust
+        for your needs throttling and lock sensitivity (if you download new
+        version, don't overwrite your custom.ps1)</li>
     </ul>
     <p><strong>SQL server script<br>
       </strong></p>
@@ -46,12 +49,12 @@
         with object list and sizes. This procedure usually finishes it's work it
         few seconds</li>
       <li>Execute procedure<strong> FRG_FillFragmentation</strong> to analyze a
-        level of fragmentation. It could take up to a day to analyze 30-100Tb.
-        This is why powershell program doesn't analyze the fragmentation level
-        during it's run, but relies on the previously collected information.
-        First parameter of this stored procedure allows you to limit the
-        analysis by a single database. By default all non system databases are
-        analyzed.</li>
+        level of fragmentation. It could take up to a day or more to analyze
+        30-100Tb (to limit the impact, check '2-server mode'). This is why
+        powershell program doesn't analyze the fragmentation level during it's
+        run, but relies on the previously collected information. First parameter
+        of this stored procedure allows you to limit the analysis by a single
+        database. By default all non system databases are analyzed.</li>
       <li>When script finishes the index rebuild, it updates the size and
         fragmentation info using the stored procedure <strong>FRG_FillFragmentationOne</strong>.
         Typically fragmentation level drops below the threshold, so on the next
@@ -77,6 +80,10 @@
         <ul>
           <li><strong>server</strong> - server name (Integrated Security is
             used, if you do need SQL login edit the ps1 file)</li>
+          <li><b>replicaserver</b> - read only replica where fragmentation
+            analysis is executed to limit the stress on the mains server, check
+            '2-server mode'. if parameter is blank or the same as server, all
+            queries run against the same server</li>
           <li><strong>dbname</strong> - Database name to defragement. You can
             provide comma separated list. * means all non-system databases.</li>
           <li><strong>workdb</strong> - DBA database (see above)</li>
@@ -230,8 +237,6 @@
       <li>If you chose <b>chunkminutes </b>too small the rebuild performance
         could suffer because of the "rewinding effect"</li>
       <li>COLUMNSTORE support is experimental.</li>
-      <li>INDEX REORGANIZE is too slow for big tables (many Tb) and for
-        COLUMNSTORE as well, this is why I focus on REBUILD only.</li>
     </ul>
     <p><br>
       <strong>Standard Edition: tips and tricks<br>
@@ -253,7 +258,7 @@
         and for each category to define how much it can wait for locks (for
         example, job named XXX can wait for 1 hour, job YYY for 10 minutes,
         other processes are interactive and process should yield immediately)</li>
-      <li>progress indicator is available for nonresumable operations - even it
+      <li>progress indicator is available for non-resumable operations - even it
         is not provided by SQL server, quite accurate estimation is done based
         on other system counters</li>
     </ul>
@@ -268,14 +273,32 @@
         REORGANIZE, it is +/- 15% accurate in most cases</li>
       <li>sometimes the reorganized area hits the 'hot spot' where data is
         inserted on a systems under heavy load, and REORGANIZE never ends. For
-        that reason if estimated percentage reaches 120%, process is terminated.</li>
+        that reason if estimated percentage reaches 120%, process is terminated
+        and statistics is recalculated.</li>
       <li>reorganize is throttled the same way other operations. It can cause
         locking - typically on schema locks.</li>
     </ul>
     <p><strong>Rebuild Log<br>
       </strong></p>
     <p>Is saved into a table <b>FRG_Log</b></p>
-    <p><b>Change Log:</b></p>
+    <p><br>
+      <strong>Two server mode (taking benefits of the readable replica)<br>
+      </strong> </p>
+    <p>Index analysis creates huge read stress on a server, reading all tables.
+      If possible, it makes sense to move this process to a secondary replica.
+      Simply provide replica server name in <b>replicaserver</b> parameter.
+      Note: it is assumed that there is a <i>DBA database</i> there, and that
+      database is read-write, so, it is not part of the AlwaysOn (or for that
+      group replica server is primary). </p>
+    <p>You should run stress-full <strong>FRG_FillFragmentation</strong> there.
+      After finishing each index rebuild, Powershell script will also run <strong>FRG_FillFragmentationOne</strong>
+      on the secondary server to update fragmentation statistics. </p>
+    <p>Note: before running <strong>FRG_FillFragmentationOne</strong> it waits
+      for the current LSN on the primary database to be replicated to the
+      replica server.</p>
+    <p><b><br>
+      </b></p>
+    <p><b>Change Log:</b> </p>
     <p><b>v1.10</b></p>
     <ul>
       <li>Introducing custom throttle events. Works similar to all other
@@ -349,8 +372,7 @@
         <li>YAML is not natively supported by Powershell</li>
       </ul>
     </ul>
-    <b><b><b><b><b><b><b><b><b><b>v1.23</b> </b> </b></b> </b></b>
-          </b></b></b></b>
+    <b><b><b><b><b><b><b><b><b><b>v1.23</b> </b> </b></b> </b></b> </b></b></b></b>
     <ul>
       <li>new heuristics for INDEX REBUILD OFFLINE<b><br>
         </b></li>
@@ -365,11 +387,18 @@
       <ul>
       </ul>
     </ul>
+    <p><b><b><b><b>v1.30</b> </b> </b></b> </p>
+    <ul>
+      <li>multiple bug fixes and optimizations</li>
+      <li>2-server mode</li>
+    </ul>
+    <p><b><br>
+      </b></p>
     <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
         target="_blank">https://www.actionatdistance.com/</a><b><br>
       </b></p>
     <p><br>
     </p>
-</body>
+`  </body>
   <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>
