@@ -11,7 +11,7 @@ function MSSQLquery([string] $connstr, [string]$sql) {
   $adp = New-Object System.Data.SqlClient.SqlDataAdapter $sqlcmd
   $data = New-Object System.Data.DataSet
   $adp.Fill($data) | Out-Null
-  $_.Exception.Message | Out-File "$settingfile.log" -Append  
+  #$_.Exception.Message | Out-File "$settingfile.log" -Append  
   $d = $data.Tables[0]
   $sqlConn.Close()
   return $d 
@@ -29,7 +29,7 @@ function MSSQLscalar([string] $connstr, [string]$sql) {
   $adp = New-Object System.Data.SqlClient.SqlDataAdapter $sqlcmd
   $data = New-Object System.Data.DataSet
   $adp.Fill($data) | Out-Null
-  $_.Exception.Message | Out-File "$settingfile.log" -Append  
+  #$_.Exception.Message | Out-File "$settingfile.log" -Append  
   $firstrow = $data.Tables[0][0]
   $sqlConn.Close()
   return $firstrow
@@ -44,7 +44,7 @@ function MSSQLexec([string] $connstr, [string]$sql) {
   $sqlcmd.CommandText = $sql
   $sqlcmd.CommandTimeout = 1000000
   $ret = $sqlcmd.ExecuteNonQuery()
-  $_.Exception.Message | Out-File "$settingfile.log" -Append  
+  #$_.Exception.Message | Out-File "$settingfile.log" -Append  
   $sqlConn.Close()
   return $ret
 }
@@ -58,7 +58,7 @@ function MSSQLexecQuick([string] $connstr, [string]$sql) {
   $sqlcmd.CommandText = $sql
   $sqlcmd.CommandTimeout = 15
   $ret = $sqlcmd.ExecuteNonQuery()
-  $_.Exception.Message | Out-File "$settingfile.log" -Append  
+  #$_.Exception.Message | Out-File "$settingfile.log" -Append  
   $sqlConn.Close()
   return $ret
 }
@@ -645,6 +645,8 @@ select distinct P.spid,
     $after = $delta.After
     $diff = $delta.delta
     Write-Host "Stats updated, $before Mb -> $after Mb, delta $diff Mb"
+    "$db $schema.$table, index $index, partition $par" | Out-File "$settingfile.log" -Encoding utf8 -Append
+    "  stats updated, $before Mb -> $after Mb, delta $diff Mb" | Out-File "$settingfile.log" -Encoding utf8 -Append
   }
   else {
     LOG $db $schema $table $index $par "FAILED" $res
@@ -666,7 +668,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.30, github https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.31, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
