@@ -3,7 +3,7 @@
 # where to rebuild, MUST CHANGE!!!
 $server = "your server" # must change
 $replicaserver = $server # used for 2 server mode, with read-only replica
-$dbname = "db1,db2" # * means all 9except system databases and ReportServer*), comma-separated list is also accepted
+$dbname = "db1,db2" # * means all (except system databases and ReportServer*), comma-separated list is also accepted
 $workdb = "TOCHANGE" # chaneg to your DBA database, where FRG_ objects are installed
 
 # values below work well as defaults
@@ -20,6 +20,7 @@ $rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=1" # Additional options, for example
 $columnstoreopt = "MAXDOP=1" # options for for column store tables
 $reorganizeopt = "" # for index reorganize
 $relaxation = 10 # period we wait before attempts, giving time for other processes to complete
+$checkevery = 15 # default, check for locks every 15 seconds, except for smaller tables
 $maxcpu = 80 # throttles when cpu is above this level
 $maxlogused = 50000 # Mb max log used throttling, 0 - no throttling
 $maxlogusedpct = 0 # max log pct used throttling, 0 - no throttling

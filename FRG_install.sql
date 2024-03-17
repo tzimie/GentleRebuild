@@ -1,4 +1,4 @@
-USE [Tuning]
+USE [tempdb] -- to change!!!!!
 GO
 
 SET ANSI_NULLS ON
@@ -19,7 +19,8 @@ CREATE TABLE [dbo].[FRG_SizeStats](
 	[index_id] [int] NOT NULL,
 	[rows] [bigint] NULL,
 	[partition] [int] NULL,
-	[TotalSpaceMB] [bigint] NULL
+	[TotalSpaceMB] [bigint] NULL,
+	compression varchar(120) null
 ) ON [PRIMARY]
 GO
 
@@ -72,9 +73,9 @@ GO
 
 CREATE view [dbo].[FRG_SizeStatsLast]
 as
-  select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,table_id,index_id,rows,TotalSpaceMb
+  select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,table_id,index_id,rows,TotalSpaceMb,compression
     from (
-      select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,table_id,index_id,rows,TotalSpaceMb
+      select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,table_id,index_id,rows,TotalSpaceMb,compression
       ,(row_number() over (partition by dbid,table_id,index_id,partition order by DT desc)) as ord
       from FRG_SizeStats) Q
 	  where ord=1 -- last
@@ -82,7 +83,7 @@ GO
 
 CREATE view [dbo].[FRG_last]
 as
-select F.DT,Dbname,SchemaName,TableName,IndexName,S.Partition,IndexType,rows,TotalSpaceMb,
+select F.DT,Dbname,SchemaName,TableName,IndexName,S.Partition,IndexType,rows,TotalSpaceMb,compression,
    page_count,isnull(fragment_count,0) as frag_count,
    case when page_count>0 then 100.*fragment_count/page_count else 0 end as frag_pct, frag_pct as frag_pct_sql,
    page_used_pct,isnull(frag_size_pages,0) as frag_size_pages, density, depth
@@ -94,7 +95,7 @@ select F.DT,Dbname,SchemaName,TableName,IndexName,S.Partition,IndexType,rows,Tot
 	  and atype='DETAILED'
 GO
 
-CREATE procedure [dbo].[FRG_FillSizeStats]
+create procedure [dbo].[FRG_FillSizeStats]
 as
 declare @db nvarchar(256), @sql varchar(8000)
 set @db=db_name()
@@ -104,7 +105,8 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   SchemaName, TableName, IndexName, IndexType, object_id as table_id, index_id,
   sum(rows) as rows,
   partition_number as partition, 
-  sum(a.total_pages / 128)  AS TotalSpaceMB
+  sum(a.total_pages / 128)  AS TotalSpaceMB,
+  data_compression_desc as compression
   from (
     SELECT t.object_id, i.index_id,
     s.Name AS SchemaName,
@@ -112,7 +114,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
 	isnull(i.name,'''') AS IndexName,
 	isnull(i.type_desc,'''') as IndexType,
     p.rows,
-	p.partition_number, p.partition_id
+	p.partition_number, p.partition_id, data_compression_desc
   FROM sys.tables t
   INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
   INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
@@ -120,7 +122,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4
   ) Q
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
-  GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number'
+  GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number, data_compression_desc'
 EXECUTE master.sys.sp_MSforeachdb @sql
 GO
 
@@ -199,7 +201,8 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   SchemaName, TableName, IndexName, IndexType, object_id as table_id, index_id,
   sum(rows) as rows,
   partition_number as partition, 
-  sum(a.total_pages / 128)  AS TotalSpaceMB
+  sum(a.total_pages / 128)  AS TotalSpaceMB,
+  data_compression_desc as compression
   from (
     SELECT t.object_id, i.index_id,
     s.Name AS SchemaName,
@@ -207,7 +210,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
 	isnull(i.name,'''') AS IndexName,
 	isnull(i.type_desc,'''') as IndexType,
     p.rows,
-	p.partition_number, p.partition_id
+	p.partition_number, p.partition_id, data_compression_desc
   FROM sys.tables t
   INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
   INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
@@ -217,7 +220,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
   where SchemaName='''+@SchemaName+''' and TableName='''+@TableName+''' and IndexName='''+@IndexName+'''
     and partition_number='+convert(varchar,@par)+' 
-  GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number
+  GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number, data_compression_desc
 '
   exec (@sql)
   select @after=TotalSpaceMb from FRG_last where Dbname=@db 

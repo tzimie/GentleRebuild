@@ -292,6 +292,7 @@ select distinct P.spid,
   $maxspidcnt = 0
   if ($siz -gt 3) { $pollinterval = 5 } 
   if ($siz -gt 30) { $pollinterval = 15 }
+  if ($polliterval -gt $checkevery) { $pollinterval = $checkevery }
   
   while ((Get-Job -id $j.id).State -eq "Running") {
     $globalcnt = $globalcnt + 1
@@ -645,6 +646,7 @@ select distinct P.spid,
     $after = $delta.After
     $diff = $delta.delta
     Write-Host "Stats updated, $before Mb -> $after Mb, delta $diff Mb"
+    (Get-Date -Format "yyyy-MM-dd HH:mm:ss") | Out-File "$settingfile.log" -Encoding utf8 -Append
     "$db $schema.$table, index $index, partition $par" | Out-File "$settingfile.log" -Encoding utf8 -Append
     "  stats updated, $before Mb -> $after Mb, delta $diff Mb" | Out-File "$settingfile.log" -Encoding utf8 -Append
   }
@@ -668,7 +670,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.31, github https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.32, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
@@ -690,6 +692,7 @@ $rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=2" # Additional options, for example
 $columnstoreopt = "MAXDOP=1" # for column store
 $reorganizeopt = "" # for index reorganize
 $relaxation = 50 # period we wait before attempts, giving time for other processes to complete
+$checkevery = 15 # chack for locks every N seconds
 $chunkminutes = 1000000 # max period of continuous work, this is an artificial MAX_DURATION. use it, not SQL server setting
 $maxcpu = 80 # max cpu pct to throttle
 $maxlogused = 200 * 1000 # Mb max log used throttling, 0 - no throttling
