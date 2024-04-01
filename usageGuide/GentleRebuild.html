@@ -49,14 +49,15 @@
         such database, use msdb.</li>
       <li>Execute procedure <strong>FRG_FillSizeStats</strong> to fill a table
         with object list and sizes. This procedure usually finishes it's work it
-        few seconds</li>
+        few seconds. You can limit it to a singled database</li>
       <li>Execute procedure<strong> FRG_FillFragmentation</strong> to analyze a
         level of fragmentation. It could take up to a day or more to analyze
-        30-100Tb (to limit the impact, check '2-server mode'). This is why
-        powershell program doesn't analyze the fragmentation level during it's
-        run, but relies on the previously collected information. First parameter
-        of this stored procedure allows you to limit the analysis by a single
-        database. By default all non system databases are analyzed.</li>
+        30-100Tb (to limit the impact, check '2-server mode'), defult analysis
+        mode is DETAILED. This is why powershell program doesn't analyze the
+        fragmentation level during it's run, but relies on the previously
+        collected information. First parameter of this stored procedure allows
+        you to limit the analysis by a single database. By default all non
+        system databases are analyzed.</li>
       <li>When script finishes the index rebuild, it updates the size and
         fragmentation info using the stored procedure <strong>FRG_FillFragmentationOne</strong>.
         Typically fragmentation level drops below the threshold, so on the next
@@ -157,6 +158,7 @@
           <li><strong>relaxation</strong> - number of seconds process sleeps
             when throttled by throttling conditions (LDF use size, AlwaysOn
             queues, locking)</li>
+          <li><b>checkevery</b> - check for locks every N seconds, default 15</li>
           <li><b>maxcpu</b> - percentage of the CPU for the last 10 minutes,
             process is throttled if cpu is higher</li>
           <li><strong>maxlogused</strong> - size in Mb used in log (LDF). When
@@ -394,8 +396,31 @@
       <li>multiple bug fixes and optimizations</li>
       <li>2-server mode</li>
     </ul>
-    <p><b><br>
-      </b></p>
+    <ul>
+      <ul>
+      </ul>
+    </ul>
+    <p><b><b><b><b>v1.32</b> </b> </b></b> </p>
+    <ul>
+      <li>FRG_last view now stores compression type. Please regenerate stats for
+        new version! Underlying tables had changed! (but .ps1 code is compatible
+        with the old ones)</li>
+      <li>checkevery parameter - can check locks with any frequency, if 15
+        seconds is too long.</li>
+      <li>text log has the same name as config file</li>
+    </ul>
+    <p> </p>
+    <ul>
+      <ul>
+      </ul>
+    </ul>
+    <p><b><b><b><b>v1.33</b> </b> </b></b> </p>
+    <ul>
+      <li>Supports SAMPLED and LIMITED index analysis, default is still DETAILED</li>
+      <li>FRG_FillSizeStats can be limited by a single database</li>
+    </ul>
+    <ul>
+    </ul>
     <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
         target="_blank">https://www.actionatdistance.com/</a><b><br>
       </b></p>

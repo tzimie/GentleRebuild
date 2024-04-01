@@ -1,4 +1,4 @@
-USE [Tuning]
+USE [tempdb]
 GO
 drop TABLE [dbo].[FRG_SizeStats]
 GO

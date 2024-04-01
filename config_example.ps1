@@ -3,8 +3,8 @@
 # where to rebuild, MUST CHANGE!!!
 $server = "your server" # must change
 $replicaserver = $server # used for 2 server mode, with read-only replica
-$dbname = "db1,db2" # * means all (except system databases and ReportServer*), comma-separated list is also accepted
-$workdb = "TOCHANGE" # chaneg to your DBA database, where FRG_ objects are installed
+$dbname = "db1,db2" # * means all (except system databases and ReportServer), comma-separated list is also accepted
+$workdb = "TOCHANGE" # change to your DBA database, where FRG_ objects are installed
 
 # values below work well as defaults
 # what to rebuild
@@ -12,7 +12,7 @@ $reorganize = 0 # 1 to do INDEX REORGANIZE instead of rebuild
 $allowNonResumable = 50 # Gb. if Resumable is not possible, do it without Resumable option. If table is begger, then skip
 $allowNonOnline = 10 # Gb. if ONLINE is not possible, do it without ONLINE option. If table is begger, then skip
 $threshold = 40 # rebuild if fragmentation percent is above
-$extrafilter = " and SchemaName not in ('tmp','import') and page_count>1000 " # must be blank or start with <space>and ...
+$extrafilter = " and SchemaName not in ('tmp','import') and IndexType not like 'INMEM%' and page_count>1000 " # must be blank or start with <space>and ...
 
 # options
 $deadline = "" # blank or format "HH:mm". When time already passed today, tomorrow is assumed. "" for no deadline

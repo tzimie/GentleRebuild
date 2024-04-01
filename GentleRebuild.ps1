@@ -292,7 +292,7 @@ select distinct P.spid,
   $maxspidcnt = 0
   if ($siz -gt 3) { $pollinterval = 5 } 
   if ($siz -gt 30) { $pollinterval = 15 }
-  if ($polliterval -gt $checkevery) { $pollinterval = $checkevery }
+  if ($pollinterval -gt $checkevery) { $pollinterval = $checkevery }
   
   while ((Get-Job -id $j.id).State -eq "Running") {
     $globalcnt = $globalcnt + 1
@@ -337,7 +337,7 @@ select distinct P.spid,
           Write-host -ForegroundCOlor Yellow "  S - STOP   - exits script, but leaves index in rebuild state"
         }
         if ($cmd.contains( "REORGANIZE")) {
-          Write-host -ForegroundCOlor Yellow "  R - for REORGANIZE, stops processing and recalulate new stats"
+          Write-host -ForegroundColor Yellow "  R - for REORGANIZE, stops processing and recalulates new stats"
         }
         Write-host -ForegroundCOlor Yellow "  F - FINISH - finishes current index rebuild and then stops"
         Write-host -ForegroundCOlor Yellow "  K - SKIP   - aborts (skips) this index but continues with the rest of the work"
@@ -670,7 +670,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.32, github https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.33, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
@@ -1020,6 +1020,13 @@ foreach ($r in $req) {
             -or ($other -gt 0) `
             -or ($cpupct -gt $maxcpu) `
             -or ($qlen -gt $maxqlen / 2)) {
+          if (($reorganize -eq 1) -and ($deadline -gt "")) { # in REORG, we can just abandon an operation
+            if ((get-date) -gt $dl) {
+              Write-host -ForegroundColor Red "Deadline reached, stopping"
+              LOG "" "" "" "" 0 "DEADLINE" $deadline
+              exit
+            }
+          }  
           Write-Host "  still waiting..."
           fKill $connstr $db -1 # DBG
           Start-Sleep -Seconds $relaxation
