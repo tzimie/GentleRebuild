@@ -531,6 +531,13 @@ select distinct P.spid,
               exit
             }
           }
+          if ($deadline -gt "" -and $etaval -ne $Null -and $harddeadline -gt 0) {
+            if ($etaval -gt $dl) {
+              Write-Host -ForegroundColor yellow "Current index won't complete in time before the HARD deadline ($deadline)"
+              fKILL $connstrX $db 1
+              exit
+            }
+          }
         }
       }
       else {
@@ -602,6 +609,10 @@ select distinct P.spid,
     $res = "Index is not rebuildable with RESUMABLE=ON"
     $status = 4
   }
+  elseif ($res.Contains("The RESUMABLE option is not supported")) {
+    $res = "Index is not rebuildable with RESUMABLE=ON"
+    $status = 4
+  }
   elseif ($res.Contains("failed because the index contains")) {
     $res = "Index is not rebuildable ONLINE"
     $status = 5
@@ -670,7 +681,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.33, github https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.35, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
@@ -687,7 +698,9 @@ $extrafilter = " and SchemaName not in ('tmp','import')"
 $reorganize = 0 # 1 use use REORANIZE instead of REBUILD
 
 # options
+$starttime = "" # HH:mm wait start time (for maint window). "" start immediately
 $deadline = "" # HH:mm when already passed today, tomorrow is assumed. "" for no deadline
+$harddeadline = 0 # if 1, process is terminated no matter what stage
 $rebuildopt = "DATA_COMPRESSION=PAGE,MAXDOP=2" # Additional options, for example, MAXDOP, but NOT MAX_DURATION and not SORT_IN_TEMPDB
 $columnstoreopt = "MAXDOP=1" # for column store
 $reorganizeopt = "" # for index reorganize
@@ -727,7 +740,10 @@ if ($deadline -gt "") {
     Write-Host "For the deadline $deadline, tomorrow is assumed!"
     $dl = $dl.AddDays(1)
   }
-  Write-Host "Deadline: $dl" 
+  if ($harddeadline -gt 0) 
+    { Write-Host "HARD deadline: $dl" }
+  else
+    { Write-Host "Deadline: $dl" }
 }
 
 $connstr = "Server=$replicaserver;Database=$Tuning;Trusted_Connection=True;" # to DBA database, may be on RO replica
@@ -785,6 +801,18 @@ if ($row.cnt -eq 0) {
   exit
 }
 Write-Host "Total $($row.cnt) indexes with $([int]($row.rows/1000000))M rows, total size $([int]($row.TotalSpaceMb/1024))Gb"
+
+if ($starttime -gt "") {
+  $stt = [datetime]::ParseExact($starttime, 'HH:mm', $null)
+  if ($stt -le (Get-Date)) {
+    Write-Host "For the start time $starttime, tomorrow is assumed!"
+    $stt = $stt.AddDays(1)
+  }
+  Write-Host "Waiting start time: $stt" 
+  while ((get-date) -lt $stt) {
+    Start-Sleep -Seconds 1
+    }
+}
 
 LOG "" "" "" "" 0 "INIT" $where
 $worksize = $row.TotalSpaceMb
@@ -1001,6 +1029,7 @@ foreach ($r in $req) {
       Start-Sleep -Seconds $relaxation
       $throttled = 1
       while ($throttled -gt 0) {
+        if (($harddeadline -gt 0) -and ($deadline -gt "") -and ((get-date) -gt $dl)) { break } # force exit
         $logused, $logpct, $qlen, $other, $cpupct, $spidcnt = THROTTLER $db
         if ($other -eq 3) {
           # panic

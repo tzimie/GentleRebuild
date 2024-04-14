@@ -133,10 +133,20 @@
                 doesn't guarantee that work would always finish before the
                 deadline, as process can slow down later. In such cases manual
                 intervention is required (check "interactive menu")</li>
+              <li>if<b> harddeadline =1</b>, index resumable rebuild is
+                terminated at any stage, not only between 2% and 3%, to
+                guarantee that there is no activity outside of the maintenance
+                window</li>
               <li>If ETA is behind the deadline, the progress messages are
                 highlighted with yellow to attract an attention.</li>
             </ul>
           </li>
+          <li><b>harddeadline</b> - 0 (default). When 1, forces to abort
+            operations no matter what progress is.</li>
+          <li><b>starttime</b> - string in "HH:MM" format or an empty string. If
+            current time is greater than starttime, tomorrow time is assumed.
+            Forces script to wait until that time is&nbsp; reached - typically a
+            maintenance window start.</li>
           <li><strong>rebuildopt </strong>- rebuild options for ordinary
             indexes (CLUSTERED, NONCLUSTERED, HEAP). Don't use MAX_DURATION, use
             <b>chunkminutes </b>instead. Don't use SORT_IN_TEMPDB: for
@@ -405,8 +415,8 @@
       <li>FRG_last view now stores compression type. Please regenerate stats for
         new version! Underlying tables had changed! (but .ps1 code is compatible
         with the old ones)</li>
-      <li>checkevery parameter - can check locks with any frequency, if 15
-        seconds is too long.</li>
+      <li><b>checkevery</b> parameter - can check locks with any frequency, if
+        15 seconds is too long.</li>
       <li>text log has the same name as config file</li>
     </ul>
     <p> </p>
@@ -414,18 +424,31 @@
       <ul>
       </ul>
     </ul>
-    <p><b><b><b><b>v1.33</b> </b> </b></b> </p>
+    <b><b><b><b>v1.33</b> </b> </b></b>
     <ul>
       <li>Supports SAMPLED and LIMITED index analysis, default is still DETAILED</li>
       <li>FRG_FillSizeStats can be limited by a single database</li>
     </ul>
     <ul>
     </ul>
-    <p><b>Check other projects: </b><a href="https://www.actionatdistance.com/"
-        target="_blank">https://www.actionatdistance.com/</a><b><br>
-      </b></p>
+    <p><b><b><b><b>v1.34</b></b></b></b></p>
+    <ul>
+      <li><b>harddeadline</b> = 1 forces to stop at deadline no matter what</li>
+      <li><b>starttime</b> = wait for start time (used to delay for maintenance
+        window in interactive mode)</li>
+    </ul>
+    <ul>
+    </ul>
+    <p><b><b><b><b>v1.35</b> </b> </b></b> </p>
+    <ul>
+      <li>minor big fix</li>
+    </ul>
+    <ul>
+    </ul>
+    <b>Check other projects: </b><a href="https://www.actionatdistance.com/" target="_blank">https://www.actionatdistance.com/</a><b><br>
+    </b>
     <p><br>
     </p>
-</body>
+ </body>
   <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>
