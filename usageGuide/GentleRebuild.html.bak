@@ -443,20 +443,12 @@
     <ul>
       <li>minor big fix</li>
     </ul>
-    <p><b><b><b><b>v1.36</b> </b> </b></b> </p>
-    <ul>
-      <li>Added FileGroupName to FRG_last and underlying views, so script can
-        filter by Filegroup. You need to recreate script tables
-        (uninstall/install)</li>
-    </ul>
-    <ul>
-    </ul>
     <ul>
     </ul>
     <b>Check other projects: </b><a href="https://www.actionatdistance.com/" target="_blank">https://www.actionatdistance.com/</a><b><br>
     </b>
     <p><br>
     </p>
-  </body>
+ </body>
   <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>

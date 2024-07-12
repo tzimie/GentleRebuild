@@ -15,6 +15,7 @@ CREATE TABLE [dbo].[FRG_SizeStats](
 	[TableName] [sysname] NOT NULL,
 	[IndexName] [sysname] NOT NULL,
 	[IndexType] [nvarchar](60) NOT NULL,
+    [FileGroupName] sysname,
 	[table_id] [int] NOT NULL,
 	[index_id] [int] NOT NULL,
 	[rows] [bigint] NULL,
@@ -73,9 +74,9 @@ GO
 
 CREATE view [dbo].[FRG_SizeStatsLast]
 as
-  select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,table_id,index_id,rows,TotalSpaceMb,compression
+  select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,FilegroupName,table_id,index_id,rows,TotalSpaceMb,compression
     from (
-      select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,table_id,index_id,rows,TotalSpaceMb,compression
+      select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,FilegroupName,table_id,index_id,rows,TotalSpaceMb,compression
       ,(row_number() over (partition by dbid,table_id,index_id,partition order by DT desc)) as ord
       from FRG_SizeStats) Q
 	  where ord=1 -- last
@@ -83,7 +84,7 @@ GO
 
 create view [dbo].[FRG_last]
 as
-select F.DT,Dbname,SchemaName,TableName,IndexName,S.Partition,IndexType,rows,TotalSpaceMb,compression,
+select F.DT,Dbname,SchemaName,TableName,IndexName,S.Partition,IndexType,FilegroupName,rows,TotalSpaceMb,compression,
    page_count,isnull(fragment_count,0) as frag_count,
    case when page_count>0 then 100.*fragment_count/page_count else 0 end as frag_pct, frag_pct as frag_pct_sql,
    page_used_pct,isnull(frag_size_pages,0) as frag_size_pages, density, depth, atype
@@ -103,7 +104,7 @@ set @db=db_name()
 set @sql='use [?];
 insert into ['+@db+'].dbo.FRG_SizeStats
 select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
-  SchemaName, TableName, IndexName, IndexType, object_id as table_id, index_id,
+  SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id as table_id, index_id,
   sum(rows) as rows,
   partition_number as partition, 
   sum(a.total_pages / 128)  AS TotalSpaceMB,
@@ -114,16 +115,18 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
     t.NAME AS TableName,
 	isnull(i.name,'''') AS IndexName,
 	case when t.is_memory_optimized>0 then ''INMEM:'' else '''' end + isnull(i.type_desc,'''') as IndexType,
+    f.name as FilegroupName,
     p.rows,
 	p.partition_number, p.partition_id, data_compression_desc
   FROM sys.tables t
   INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+  INNER JOIN sys.filegroups f on f.data_space_id=i.data_space_id
   INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
   LEFT OUTER JOIN sys.schemas s ON t.schema_id = s.schema_id
   WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4
   ) Q
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
-  GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number, data_compression_desc'
+  GROUP BY SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id, index_id, partition_number, data_compression_desc'
 if @dbscope is NULL
   EXECUTE master.sys.sp_MSforeachdb @sql
 else  
