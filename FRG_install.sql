@@ -209,7 +209,7 @@ as
 'USE ['+@db+']; 
 insert into ['+db_name()+'].dbo.FRG_SizeStats
 select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
-  SchemaName, TableName, IndexName, IndexType, object_id as table_id, index_id,
+  SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id as table_id, index_id,
   sum(rows) as rows,
   partition_number as partition, 
   sum(a.total_pages / 128)  AS TotalSpaceMB,
@@ -220,10 +220,12 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
     t.NAME AS TableName,
 	isnull(i.name,'''') AS IndexName,
 	isnull(i.type_desc,'''') as IndexType,
+    f.name as FilegroupName,
     p.rows,
 	p.partition_number, p.partition_id, data_compression_desc
   FROM sys.tables t
   INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+  INNER JOIN sys.filegroups f on f.data_space_id=i.data_space_id
   INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
   LEFT OUTER JOIN sys.schemas s ON t.schema_id = s.schema_id
   WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4 
@@ -231,7 +233,7 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
   where SchemaName='''+@SchemaName+''' and TableName='''+@TableName+''' and IndexName='''+@IndexName+'''
     and partition_number='+convert(varchar,@par)+' 
-  GROUP BY SchemaName, TableName, IndexName, IndexType, object_id, index_id, partition_number, data_compression_desc
+  GROUP BY SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id, index_id, partition_number, data_compression_desc
 '
   exec (@sql)
   select @after=TotalSpaceMb from FRG_last where Dbname=@db 
