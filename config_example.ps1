@@ -13,6 +13,12 @@ $allowNonResumable = 50 # Gb. if Resumable is not possible, do it without Resuma
 $allowNonOnline = 10 # Gb. if ONLINE is not possible, do it without ONLINE option. If table is begger, then skip
 $threshold = 40 # rebuild if fragmentation percent is above
 $extrafilter = " and SchemaName not in ('tmp','import') and IndexType not like 'INMEM%' and page_count>1000 " # must be blank or start with <space>and ...
+$orderby = "TotalSpaceMb" # processing order, default - by size from the smallest
+# "frag_pct desc" -- from the worst
+# "frag_count desc" -- from highest entropy
+# "activity desc" -- most active first
+# "activity*frag_count desc" -- extra workload for read access
+# "activity*(100-density) desc" -- potential space benefit after rebuild
 
 # options
 $deadline = "" # blank or format "HH:mm". When time already passed today, tomorrow is assumed. "" for no deadline

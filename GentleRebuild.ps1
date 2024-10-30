@@ -681,7 +681,7 @@ Write-Host -ForegroundColor Blue @"
  \_____|\___|_| |_|\__|_|\___| |_|  \_\___|_.__/ \__,_|_|_|\__,_|
                                                                 
 "@
-Write-Host -ForegroundColor Green "Version 1.36, github https://github.com/tzimie/GentleRebuild"
+Write-Host -ForegroundColor Green "Version 1.37, github https://github.com/tzimie/GentleRebuild"
 
 # where to defragment
 # setting, defaults if setting file is not provided
@@ -717,6 +717,13 @@ $forceoffline = 0 # force non online rebuild
 $offlineretries = 3 # number of retries because of locks before skipping an index
 $sortintempdb = 100000 # Mb, for OFFLINE rebuilds, max size when SORT_IN_TEMPDB can be used. use 0 to disable SORT_IN_TEMPDB
 $Tuning = "DBAdb"
+$orderby = "TotalSpaceMb" # default, by size
+# "frag_pct desc" -- from the worst
+# "frag_count desc" -- from highest entropy
+# "activity desc" -- most active first
+# "activity*frag_count desc" -- extra workload for read access
+# "activity*(100-density) desc" -- potential space benefit after rebuild
+
 
 # get params
 if ($settingfile -gt "") {
@@ -823,7 +830,7 @@ $session_started = get-Date
 [console]::TreatControlCAsInput = $true
 $Host.UI.RawUI.FlushInputBuffer()
 $global:finishflag = 0
-$q = "select DbName,SchemaName,TableName,IndexName,partition,TotalSpaceMb,page_count,frag_count,IndexType,frag_pct,NumPartitions,density from FRG_last $where order by TotalSpaceMb" 
+$q = "select DbName,SchemaName,TableName,IndexName,partition,TotalSpaceMb,page_count,frag_count,IndexType,frag_pct,NumPartitions,density from FRG_last $where order by $orderby" 
 $req = MSSQLscalar $connstr $q
 foreach ($r in $req) {
   if ($global:finishflag -eq 1) {
@@ -1126,4 +1133,3 @@ foreach ($r in $req) {
 }
 $dtformatted = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 Write-Host "$dtformatted - All done!"
-

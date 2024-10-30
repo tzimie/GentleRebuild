@@ -32,10 +32,10 @@
       <li>Indexes which can't be rebuilt with the options <b>RESUMABLE=ON</b>
         or even <b>ONLINE=ON </b>- such case indexes are skipped when size is
         above the defined thresholds</li>
-      <li>Limits the maximum duration of continuous index rebuild </li>
-      <li>Limits the maximum size of indexes rebuild during a single run - in
-        case the amount of total space for transaction log backups is limited or
-        logs are used to roll over to STANDBY databases.</li>
+      <li>Maximum duration of continuous index rebuild </li>
+      <li>Maximum size of indexes rebuild during a single run - in case the
+        amount of total space for transaction log backups is limited or logs are
+        used to roll over to STANDBY databases.</li>
       <li>Custom throttling conditions - review <b>custom.ps1</b> and adjust
         for your needs throttling and lock sensitivity (if you download new
         version, don't overwrite your custom.ps1)</li>
@@ -47,6 +47,8 @@
         In almost any environment there is dedicated "DBA" database - DBA,
         SYSSYS, Optimization, names differ. In the worst case, if there is no
         such database, use msdb.</li>
+      <li>Execute <b>FRG_FillUsageStats </b>if needed (check changes in v1.37
+        for more details)</li>
       <li>Execute procedure <strong>FRG_FillSizeStats</strong> to fill a table
         with object list and sizes. This procedure usually finishes it's work it
         few seconds. You can limit it to a singled database</li>
@@ -204,6 +206,8 @@
             index operation can be aborted when there are locks. Script will
             retry the operation soon after. But after the specified number of
             retries if would give up and skip this index</li>
+          <li><b>orderby</b> - order in which tables are processed, for more
+            details check changes in v1.37</li>
         </ul>
       </li>
     </ul>
@@ -439,7 +443,7 @@
     </ul>
     <ul>
     </ul>
-    <p><b><b><b><b>v1.35</b> </b> </b></b> </p>
+    <b><b><b><b>v1.35</b> </b> </b></b>
     <ul>
       <li>minor big fix</li>
     </ul>
@@ -449,6 +453,25 @@
         filter by Filegroup. You need to recreate script tables
         (uninstall/install)</li>
     </ul>
+    <p><b><b><b><b>v1.37</b> </b> </b></b> </p>
+    <ul>
+      <li>new parameter, <b>orderby</b> to control the processing order</li>
+      <li><b>"TotalSpaceMb"</b>&nbsp; default - by size from the smallest</li>
+      <li><b>"frag_pct desc"</b>&nbsp; from the worst</li>
+      <li><b>"frag_count desc"&nbsp;</b> from highest entropy</li>
+      <li><b>"activity desc"</b>&nbsp; most active first</li>
+      <li><b>"activity*frag_count desc"</b>&nbsp; extra workload for read access</li>
+      <li><b>"activity*(100-density) desc"</b>&nbsp; potential space benefit
+        after rebuild</li>
+    </ul>
+    <p>Note: new column activity is calculated based on the index usage
+      statistics from <b>sys.dm_db_index_usage_stats</b>, value is calculated
+      as sum of seeks and lookups and the number of scans, multiplied by table
+      size. Value is populated by procedure <b>FRG_FillUsageStats </b>which
+      must be called before <b>FRG_FillFragmentation.</b></p>
+    <p>On two server configuration, where activity happens on the primary node,
+      but fragmentation analysis is done on the secondary node, information from
+      <b>dm_db_index_usage_stats</b> can be transferred using procedure <b>FRG_PrintUsageStats</b></p>
     <ul>
     </ul>
     <ul>
@@ -457,6 +480,6 @@
     </b>
     <p><br>
     </p>
-  </body>
+ </body>
   <!-- Global site tag (gtag.js) - Google Analytics -->
 </html>

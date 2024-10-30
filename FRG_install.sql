@@ -1,4 +1,4 @@
-USE [tempdb] 
+USE [DBAdefrag] 
 GO
 
 SET ANSI_NULLS ON
@@ -21,8 +21,17 @@ CREATE TABLE [dbo].[FRG_SizeStats](
 	[rows] [bigint] NULL,
 	[partition] [int] NULL,
 	[TotalSpaceMB] [bigint] NULL,
-	compression varchar(120) null
+	compression varchar(120) null,
+	seeks float, scans float, activity float
 ) ON [PRIMARY]
+GO
+
+create table FRG_UsageStats (
+  [DbName] [nvarchar](128) NULL,
+  table_id int,
+  index_id int,
+  [partition] int,
+  seeks float, scans float, activity float)
 GO
 
 CREATE TABLE [dbo].[FRG_Levels](
@@ -74,9 +83,9 @@ GO
 
 CREATE view [dbo].[FRG_SizeStatsLast]
 as
-  select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,FilegroupName,table_id,index_id,rows,TotalSpaceMb,compression
+  select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,FilegroupName,table_id,index_id,rows,TotalSpaceMb,compression,seeks,scans,activity
     from (
-      select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,FilegroupName,table_id,index_id,rows,TotalSpaceMb,compression
+      select DT,dbid,DBname,SchemaName,TableName,IndexName,Partition,IndexType,FilegroupName,table_id,index_id,rows,TotalSpaceMb,compression,seeks,scans,activity
       ,(row_number() over (partition by dbid,table_id,index_id,partition order by DT desc)) as ord
       from FRG_SizeStats) Q
 	  where ord=1 -- last
@@ -90,11 +99,68 @@ select F.DT,Dbname,SchemaName,TableName,IndexName,S.Partition,IndexType,Filegrou
    page_used_pct,isnull(frag_size_pages,0) as frag_size_pages, density, depth, atype
    ,(select count(*) from FRG_levelsLast FF 
       where S.DBID=FF.db_id and S.table_id=FF.table_id and S.index_id=FF.index_id) as NumPartitions
+   ,seeks, scans, activity
   from FRG_SizeStatsLast S
   LEFT OUTER JOIN FRG_levelsLast F 
     on S.DBID=F.db_id and S.table_id=F.table_id and S.index_id=F.index_id and S.partition=F.partition
 GO
 
+create procedure [dbo].[FRG_FillUsageStats]
+  @dbscope varchar(128)=NULL
+as
+create table #sizes ([DbName] [nvarchar](128), table_id int, index_id int, [rows] bigint, partition int, pages bigint)
+create table #usage ([DbName] [nvarchar](128), object_id int, index_id int, seeks bigint, scans bigint)
+declare @db nvarchar(256), @sql varchar(8000)
+set @db=db_name()
+set @sql='use [?]; insert into #sizes
+select DB_NAME() as DbName, 
+  t.object_id as table_id, i.index_id, rows,
+  partition_number as partition, 
+  total_pages as pages
+  FROM sys.tables t
+  INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+  INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+  INNER JOIN sys.allocation_units a ON partition_id = a.container_id
+  WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4
+insert into #usage select DB_NAME() as DbName, object_id, index_id, user_seeks+user_lookups, user_scans
+  from sys.dm_db_index_usage_stats'
+if @dbscope is NULL
+  EXECUTE master.sys.sp_MSforeachdb @sql
+else  
+  begin
+  set @sql=replace(@sql, '[?]', '['+@dbscope+']')
+  exec(@sql)
+  end
+select DbName,table_id,index_id,sum(rows) as totalrows,sum(pages) AS totalpages 
+  into #totals
+  from #sizes group by DbName,table_id,index_id
+select S.DbName,S.table_id,S.index_id,S.partition,pages,
+  case when totalpages=0 then 1.0 else convert(float,pages)/totalpages end as pct
+  into #pct
+  from #sizes S 
+  inner join #totals T on S.DbName=T.DbName and S.table_id=T.table_id and S.index_id=T.index_id
+select p.DbName,p.table_id,p.index_id,partition,
+  seeks*pct as seeks, scans*pct as scans, (seeks+scans*pages)*pct as activity
+  into #final
+  from #pct p
+  inner join #usage u on p.DbName=u.DbName and p.table_id=u.object_id and p.index_id=u.index_id
+truncate table FRG_UsageStats
+insert into FRG_UsageStats select * from #final where activity>0
+GO
+
+create procedure FRG_PrintUsageStats
+as
+  select 'truncate table FRG_UsageStats' as txt
+  union all
+  select 'insert into FRG_UsageStats select '''+DbName+''','
+    +convert(varchar,table_id)
+    +','+convert(varchar,index_id)
+    +','+convert(varchar,partition)
+    +','+convert(varchar,seeks)
+    +','+convert(varchar,scans)
+    +','+convert(varchar,activity)
+    from FRG_UsageStats
+GO
 
 create procedure [dbo].[FRG_FillSizeStats]
   @dbscope varchar(128)=NULL
@@ -103,7 +169,8 @@ declare @db nvarchar(256), @sql varchar(8000)
 set @db=db_name()
 set @sql='use [?];
 insert into ['+@db+'].dbo.FRG_SizeStats
-select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
+select X.*,isnull(U.seeks,0.0),isnull(U.scans,0.0),isnull(U.activity,0.0) from (
+ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
   SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id as table_id, index_id,
   sum(rows) as rows,
   partition_number as partition, 
@@ -126,7 +193,8 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   WHERE t.is_ms_shipped = 0 AND i.OBJECT_ID > 255 and db_id()>4
   ) Q
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
-  GROUP BY SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id, index_id, partition_number, data_compression_desc'
+  GROUP BY SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id, index_id, partition_number, data_compression_desc) X
+left outer join ['+@db+'].dbo.FRG_UsageStats U on U.DbName=X.DbName and U.table_id=X.table_id and U.index_id=X.index_id and U.partition=X.partition'
 if @dbscope is NULL
   EXECUTE master.sys.sp_MSforeachdb @sql
 else  
@@ -176,7 +244,7 @@ select getdate(),database_id,object_id,index_id,partition,'''+@mode+''',
   DEALLOCATE ti
 GO
 
-create procedure [dbo].[FRG_FillFragmentationOne]
+create procedure [dbo].[FRG_FillFragmentationOne] 
   @db sysname, @schemaname sysname, @tablename sysname, @indexname sysname, @par int
 as
   set nocount on
@@ -208,7 +276,8 @@ as
   set @sql=
 'USE ['+@db+']; 
 insert into ['+db_name()+'].dbo.FRG_SizeStats
-select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
+select X.*,isnull(U.seeks,0.0),isnull(U.scans,0.0),isnull(U.activity,0.0) from (
+ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName, 
   SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id as table_id, index_id,
   sum(rows) as rows,
   partition_number as partition, 
@@ -233,8 +302,8 @@ select getdate() as DT, DB_ID() as DBID, DB_NAME() as DbName,
   INNER JOIN sys.allocation_units a ON Q.partition_id = a.container_id
   where SchemaName='''+@SchemaName+''' and TableName='''+@TableName+''' and IndexName='''+@IndexName+'''
     and partition_number='+convert(varchar,@par)+' 
-  GROUP BY SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id, index_id, partition_number, data_compression_desc
-'
+  GROUP BY SchemaName, TableName, IndexName, IndexType, FilegroupName, object_id, index_id, partition_number, data_compression_desc) X
+left outer join ['+db_name()+'].dbo.FRG_UsageStats U on U.DbName=X.DbName and U.table_id=X.table_id and U.index_id=X.index_id and U.partition=X.partition'
   exec (@sql)
   select @after=TotalSpaceMb from FRG_last where Dbname=@db 
     and Schemaname=@schemaname and TableName=@tablename and IndexName=@indexname and Partition=@par
